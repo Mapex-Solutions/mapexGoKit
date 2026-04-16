@@ -19,7 +19,7 @@ func DefaultRetryPolicy() *RetryPolicy {
 			2 * time.Minute,
 			10 * time.Minute,
 		},
-		AckWait: 30 * time.Second,
+		AckWait: 5 * time.Minute,
 	}
 }
 

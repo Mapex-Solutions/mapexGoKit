@@ -13,6 +13,16 @@ import (
 	"github.com/Mapex-Solutions/mapexGoKit/microservices/logger"
 )
 
+// IsShuttingDown returns true if the process received a termination signal.
+func (m *ShutdownManager) IsShuttingDown() bool {
+	return m.terminating.Load()
+}
+
+// SetShuttingDown sets the termination flag programmatically. Used for testing.
+func (m *ShutdownManager) SetShuttingDown(v bool) {
+	m.terminating.Store(v)
+}
+
 // Register adds a Shutdowner component to the shutdown sequence.
 func (m *ShutdownManager) Register(name string, priority int, s Shutdowner) {
 	m.RegisterFunc(name, priority, s.Shutdown)
@@ -33,6 +43,7 @@ func (m *ShutdownManager) WaitForSignal(timeout time.Duration) {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
 	received := <-sig
+	m.terminating.Store(true)
 
 	logger.Info(fmt.Sprintf("[SHUTDOWN] Received %s, starting graceful shutdown (timeout: %s)...", received, timeout))
 

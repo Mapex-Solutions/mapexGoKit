@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/Mapex-Solutions/mapexGoKit/microservices/logger"
 )
 
@@ -16,7 +16,7 @@ type TestMessageCallbacks struct {
 	OnReject func(string) error
 }
 
-// Message wraps nats.Msg with retry-aware methods.
+// Message wraps jetstream.Msg with retry-aware methods.
 // Users interact with this wrapper instead of the raw NATS message.
 type Message struct {
 	// Public fields (user can read)
@@ -34,9 +34,9 @@ type Message struct {
 	Timestamp     time.Time
 
 	// Internal (not exported)
-	natsMsg       *nats.Msg
+	rawMsg        jetstream.Msg
 	consumer      *Consumer
-	meta          *nats.MsgMetadata
+	meta          *jetstream.MsgMetadata
 	index         int // Position in batch
 	testCallbacks *TestMessageCallbacks
 }
@@ -52,28 +52,28 @@ func NewTestMessage(data []byte, index int, callbacks *TestMessageCallbacks) *Me
 	}
 }
 
-// newMessage creates a new Message wrapper from a NATS message
-func newMessage(natsMsg *nats.Msg, consumer *Consumer, index int) (*Message, error) {
-	meta, err := natsMsg.Metadata()
+// newMessage creates a new Message wrapper from a jetstream message
+func newMessage(jMsg jetstream.Msg, consumer *Consumer, index int) (*Message, error) {
+	meta, err := jMsg.Metadata()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get message metadata: %w", err)
 	}
 
 	// Extract headers
 	headers := make(map[string][]string)
-	if natsMsg.Header != nil {
-		for key, values := range natsMsg.Header {
+	if jMsg.Headers() != nil {
+		for key, values := range jMsg.Headers() {
 			headers[key] = values
 		}
 	}
 
 	return &Message{
-		Data:          natsMsg.Data,
+		Data:          jMsg.Data(),
 		Headers:       headers,
-		Subject:       natsMsg.Subject,
+		Subject:       jMsg.Subject(),
 		DeliveryCount: int(meta.NumDelivered),
 		Timestamp:     meta.Timestamp,
-		natsMsg:       natsMsg,
+		rawMsg:        jMsg,
 		consumer:      consumer,
 		meta:          meta,
 		index:         index,
@@ -89,7 +89,7 @@ func (m *Message) Ack() error {
 		}
 		return nil
 	}
-	if err := m.natsMsg.Ack(); err != nil {
+	if err := m.rawMsg.Ack(); err != nil {
 		logger.Error(err, fmt.Sprintf("[INFRA:NATS] Failed to ACK message %d", m.index))
 		return err
 	}
@@ -119,7 +119,7 @@ func (m *Message) Nack(err error) error {
 	// No retry policy - just NAK (immediate redelivery)
 	if m.consumer.options.RetryPolicy == nil {
 		logger.Warn(fmt.Sprintf("[INFRA:NATS] Message %d NAKed (no retry policy): %s", m.index, errMsg))
-		return m.natsMsg.Nak()
+		return m.rawMsg.Nak()
 	}
 
 	policy := m.consumer.options.RetryPolicy
@@ -137,7 +137,7 @@ func (m *Message) Nack(err error) error {
 	logger.Warn(fmt.Sprintf("[INFRA:NATS] Message %d attempt %d/%d failed, retry in %s: %s",
 		m.index, m.DeliveryCount, policy.MaxRetries, delay, errMsg))
 
-	return m.natsMsg.NakWithDelay(delay)
+	return m.rawMsg.NakWithDelay(delay)
 }
 
 // Reject immediately sends the message to DLQ without retrying.
@@ -157,7 +157,7 @@ func (m *Message) Reject(reason string) error {
 // The message is discarded without retry and without DLQ.
 // Use this when you want to silently drop the message.
 func (m *Message) Term() error {
-	if err := m.natsMsg.Term(); err != nil {
+	if err := m.rawMsg.Term(); err != nil {
 		logger.Error(err, fmt.Sprintf("[INFRA:NATS] Failed to TERM message %d", m.index))
 		return err
 	}
@@ -170,7 +170,7 @@ func (m *Message) sendToDLQAndAck(errorMsg string) error {
 	// Check if DLQ policy is configured
 	if m.consumer.options.DLQPolicy == nil {
 		logger.Warn(fmt.Sprintf("[INFRA:NATS] No DLQ policy configured, terminating message %d", m.index))
-		return m.natsMsg.Term()
+		return m.rawMsg.Term()
 	}
 
 	dlqPolicy := m.consumer.options.DLQPolicy
@@ -203,7 +203,7 @@ func (m *Message) sendToDLQAndAck(errorMsg string) error {
 	data, err := dlqMsg.ToJSON()
 	if err != nil {
 		logger.Error(err, fmt.Sprintf("[INFRA:NATS] DLQ failed to marshal message %d", m.index))
-		return m.natsMsg.Nak() // Fallback to NAK
+		return m.rawMsg.Nak() // Fallback to NAK
 	}
 
 	// Publish to DLQ
@@ -213,14 +213,14 @@ func (m *Message) sendToDLQAndAck(errorMsg string) error {
 		Data:    data,
 	}); err != nil {
 		logger.Error(err, fmt.Sprintf("[INFRA:NATS] DLQ failed to publish to %s", dlqSubject))
-		return m.natsMsg.Nak() // Fallback to NAK
+		return m.rawMsg.Nak() // Fallback to NAK
 	}
 
 	logger.Warn(fmt.Sprintf("[INFRA:NATS] DLQ message %d sent to: %s (ID: %s)",
 		m.index, dlqSubject, dlqMsg.ID))
 
 	// ACK original message to remove from source stream
-	return m.natsMsg.Ack()
+	return m.rawMsg.Ack()
 }
 
 // GetRetryInfo returns information about retries for logging/debugging

@@ -1,17 +1,18 @@
 package natsModel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
-	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/Mapex-Solutions/mapexGoKit/microservices/logger"
 )
 
-// StartConsumer creates and starts a new managed consumer with automatic goroutine handling
-// This method encapsulates all the goroutine management and ensures proper lifecycle control
+// StartConsumer creates and starts a new managed consumer with automatic goroutine handling.
+// This method encapsulates all the goroutine management and ensures proper lifecycle control.
 //
 // Parameters:
 //   - opts: Consumer configuration including handler function
@@ -64,13 +65,19 @@ func (c *Client) StartConsumer(opts ConsumerOptions) (*Consumer, error) {
 		MaxAckPending:   maxAckPending,
 		RetryPolicy:     opts.RetryPolicy,
 		DuplicateWindow: opts.DuplicateWindow,
-		Pull:            true, // StartConsumer uses PullSubscribe
+		Pull:            true, // StartConsumer uses pull consumer
 	}); err != nil {
 		return nil, fmt.Errorf("failed to ensure stream/consumer: %w", err)
 	}
 
+	// Obtain jetstream consumer handle
+	cons, err := c.js.Consumer(context.Background(), opts.Stream, opts.Durable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get consumer handle %s: %w", opts.Durable, err)
+	}
+
 	// Start the consumer goroutine (encapsulated within the package)
-	go consumer.start()
+	go consumer.start(cons)
 
 	logger.Info(fmt.Sprintf("[INFRA:NATS] Consumer Started: stream=%s, durable=%s, batch_size=%d",
 		opts.Stream, opts.Durable, opts.BatchSize))
@@ -80,17 +87,25 @@ func (c *Client) StartConsumer(opts ConsumerOptions) (*Consumer, error) {
 
 // fetchResult holds the result of an async fetch operation used by the double-buffer pattern.
 type fetchResult struct {
-	msgs []*Msg
+	msgs []jetstream.Msg
 	err  error
 }
 
 // asyncFetch starts a fetch in a background goroutine and returns a channel with the result.
 // This enables the double-buffer pattern: prefetch batch N+1 while processing batch N.
-func (c *Consumer) asyncFetch(sub *nats.Subscription) <-chan fetchResult {
+func (c *Consumer) asyncFetch(cons jetstream.Consumer) <-chan fetchResult {
 	ch := make(chan fetchResult, 1)
 	go func() {
-		msgs, err := sub.Fetch(c.options.BatchSize, nats.MaxWait(c.options.FetchTimeout))
-		ch <- fetchResult{msgs: msgs, err: err}
+		batch, err := cons.Fetch(c.options.BatchSize, jetstream.FetchMaxWait(c.options.FetchTimeout))
+		if err != nil {
+			ch <- fetchResult{err: err}
+			return
+		}
+		var msgs []jetstream.Msg
+		for msg := range batch.Messages() {
+			msgs = append(msgs, msg)
+		}
+		ch <- fetchResult{msgs: msgs, err: batch.Error()}
 	}()
 	return ch
 }
@@ -98,25 +113,13 @@ func (c *Consumer) asyncFetch(sub *nats.Subscription) <-chan fetchResult {
 // start is the internal goroutine function that handles message consumption.
 // It uses a permanent double-buffer pattern:
 //   - Always has an async prefetch in flight (zero idle time between batches)
-//   - When stream is empty, sub.Fetch(MaxWait) blocks server-side → natural rate-limiting
+//   - When stream is empty, cons.Fetch(MaxWait) blocks server-side → natural rate-limiting
 //   - When stream has data, next batch is already fetched → 0ms idle
-func (c *Consumer) start() {
+func (c *Consumer) start(cons jetstream.Consumer) {
 	retryCount := 0
 
-	// Create pull subscription once
-	sub, err := c.client.js.PullSubscribe(
-		c.options.Subject, // Use the consumer's filter subject
-		c.options.Durable,
-		nats.BindStream(c.options.Stream),
-	)
-	if err != nil {
-		logger.Error(err, fmt.Sprintf("[INFRA:NATS] Consumer Failed to create pull subscription: %s", c.options.Durable))
-		return
-	}
-	defer sub.Unsubscribe()
-
 	// Always-on double-buffer: first fetch kicks off the pipeline
-	nextFetch := c.asyncFetch(sub)
+	nextFetch := c.asyncFetch(cons)
 
 	for {
 		// Wait for prefetch result or stop signal
@@ -128,11 +131,11 @@ func (c *Consumer) start() {
 			msgs, fetchErr := result.msgs, result.err
 
 			// Immediately start next prefetch (always in flight)
-			nextFetch = c.asyncFetch(sub)
+			nextFetch = c.asyncFetch(cons)
 
 			// Handle fetch errors
 			if fetchErr != nil {
-				if errors.Is(fetchErr, nats.ErrTimeout) {
+				if errors.Is(fetchErr, jetstream.ErrNoMessages) {
 					continue
 				}
 
@@ -167,7 +170,7 @@ func (c *Consumer) start() {
 // processBatch handles the processing of a batch of messages.
 // Prints blank lines before each batch for visual separation in terminal logs.
 // Priority: BatchMessageHandlerV2 > MessageHandlerV2 > BatchHandler > Handler
-func (c *Consumer) processBatch(msgs []*Msg) {
+func (c *Consumer) processBatch(msgs []jetstream.Msg) {
 	fmt.Println()
 	fmt.Println()
 	// NEW: BatchMessageHandlerV2 (recommended for batch with retry control)
@@ -194,18 +197,18 @@ func (c *Consumer) processBatch(msgs []*Msg) {
 
 // processBatchBulk processes all messages at once using BatchHandler.
 // Used for bulk operations like batch database inserts.
-func (c *Consumer) processBatchBulk(msgs []*Msg) {
+func (c *Consumer) processBatchBulk(msgs []jetstream.Msg) {
 	// Build BatchMessage slice
 	batchMessages := make([]BatchMessage, len(msgs))
 	for i, msg := range msgs {
 		headers := make(map[string][]string)
-		if msg.Header != nil {
-			for key, values := range msg.Header {
+		if msg.Headers() != nil {
+			for key, values := range msg.Headers() {
 				headers[key] = values
 			}
 		}
 		batchMessages[i] = BatchMessage{
-			Data:    msg.Data,
+			Data:    msg.Data(),
 			Headers: headers,
 			msg:     msg,
 		}
@@ -231,7 +234,7 @@ func (c *Consumer) processBatchBulk(msgs []*Msg) {
 
 // processBatchParallel processes messages in parallel using goroutines.
 // Each message is handled independently with its own ACK/NAK.
-func (c *Consumer) processBatchParallel(msgs []*Msg) {
+func (c *Consumer) processBatchParallel(msgs []jetstream.Msg) {
 	var wg sync.WaitGroup
 
 	// Process messages in parallel using goroutines
@@ -239,19 +242,19 @@ func (c *Consumer) processBatchParallel(msgs []*Msg) {
 		wg.Add(1)
 
 		// Launch goroutine for each message
-		go func(index int, message *Msg) {
+		go func(index int, message jetstream.Msg) {
 			defer wg.Done()
 
 			// Extract headers
 			headers := make(map[string][]string)
-			if message.Header != nil {
-				for key, values := range message.Header {
+			if message.Headers() != nil {
+				for key, values := range message.Headers() {
 					headers[key] = values
 				}
 			}
 
 			// Call user's handler function
-			err := c.options.Handler(message.Data, index, headers)
+			err := c.options.Handler(message.Data(), index, headers)
 
 			if err != nil {
 				logger.Error(err, fmt.Sprintf("[INFRA:NATS] Consumer Message %d processing failed", index))
@@ -270,7 +273,7 @@ func (c *Consumer) processBatchParallel(msgs []*Msg) {
 
 // processBatchV2 processes all messages using BatchMessageHandlerV2.
 // Each message is wrapped with retry-aware Ack/Nack/Reject methods.
-func (c *Consumer) processBatchV2(msgs []*Msg) {
+func (c *Consumer) processBatchV2(msgs []jetstream.Msg) {
 	// Convert to Message wrappers
 	messages := make([]*Message, 0, len(msgs))
 	for i, msg := range msgs {
@@ -295,20 +298,20 @@ func (c *Consumer) processBatchV2(msgs []*Msg) {
 
 // processParallelV2 processes messages in parallel using MessageHandlerV2.
 // Each message is wrapped with retry-aware Ack/Nack/Reject methods.
-func (c *Consumer) processParallelV2(msgs []*Msg) {
+func (c *Consumer) processParallelV2(msgs []jetstream.Msg) {
 	var wg sync.WaitGroup
 
 	for i, msg := range msgs {
 		wg.Add(1)
 
-		go func(index int, natsMsg *Msg) {
+		go func(index int, jMsg jetstream.Msg) {
 			defer wg.Done()
 
 			// Wrap the message
-			wrapped, err := newMessage(natsMsg, c, index)
+			wrapped, err := newMessage(jMsg, c, index)
 			if err != nil {
 				logger.Error(err, fmt.Sprintf("[INFRA:NATS] Consumer Failed to wrap message %d, NAKing", index))
-				natsMsg.Nak()
+				jMsg.Nak()
 				return
 			}
 
@@ -385,7 +388,7 @@ func (c *Client) setConsumerDefaults(opts ConsumerOptions) ConsumerOptions {
 		opts.BatchSize = 50
 	}
 	if opts.FetchTimeout == 0 {
-		opts.FetchTimeout = 5 * time.Second
+		opts.FetchTimeout = 1 * time.Second
 	}
 	if opts.RetryDelay == 0 {
 		opts.RetryDelay = 2 * time.Second
@@ -445,15 +448,17 @@ func (cm *ConsumerManager) GetConsumer(name string) (*Consumer, bool) {
 	return consumer, exists
 }
 
-// =============================================================================
-// FANOUT - Ephemeral Broadcast Consumers
-// =============================================================================
+/**
+FANOUT - Ephemeral Broadcast Consumers
+*/
 
 // Stop gracefully stops the FANOUT subscription.
 func (fs *FanoutSubscription) Stop() error {
 	var err error
 	fs.StopOnce.Do(func() {
-		if fs.Sub != nil {
+		if fs.cc != nil {
+			fs.cc.Drain()
+		} else if fs.Sub != nil {
 			err = fs.Sub.Drain()
 		}
 	})
@@ -476,33 +481,38 @@ func (b *Bus) SubscribeFanout(stream, serviceName, subject string, handler Fanou
 		return nil, fmt.Errorf("stream is required")
 	}
 
+	ctx := context.Background()
 	timestamp := time.Now().Format("20060102-150405")
 	consumerName := fmt.Sprintf("%s-fanout-%s", serviceName, timestamp)
 
 	logger.Info(fmt.Sprintf("[INFRA:NATS] FANOUT Creating ephemeral subscription: %s -> %s (stream: %s)", consumerName, subject, stream))
 
-	sub, err := b.c.js.Subscribe(
-		subject,
-		func(msg *nats.Msg) {
-			if err := handler(msg.Data); err != nil {
-				logger.Warn(fmt.Sprintf("[INFRA:NATS] FANOUT Handler error on %s: %v", subject, err))
-			}
-			_ = msg.Ack()
-		},
-		nats.BindStream(stream),
-		nats.DeliverNew(),
-		nats.ManualAck(),
-		nats.AckWait(30*time.Second),
-		nats.InactiveThreshold(5*time.Minute),
-		nats.ConsumerName(consumerName),
-	)
+	// Create ephemeral consumer with jetstream API
+	cons, err := b.c.js.CreateOrUpdateConsumer(ctx, stream, jetstream.ConsumerConfig{
+		Name:              consumerName,
+		FilterSubject:     subject,
+		DeliverPolicy:     jetstream.DeliverNewPolicy,
+		AckPolicy:         jetstream.AckExplicitPolicy,
+		AckWait:           30 * time.Second,
+		InactiveThreshold: 5 * time.Minute,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create fanout consumer: %w", err)
+	}
 
+	// Use Consume for callback-based message handling
+	cc, err := cons.Consume(func(msg jetstream.Msg) {
+		if err := handler(msg.Data()); err != nil {
+			logger.Warn(fmt.Sprintf("[INFRA:NATS] FANOUT Handler error on %s: %v", subject, err))
+		}
+		_ = msg.Ack()
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create fanout subscription: %w", err)
 	}
 
 	logger.Info(fmt.Sprintf("[INFRA:NATS] FANOUT Subscription active: %s", consumerName))
-	return &FanoutSubscription{Sub: sub}, nil
+	return &FanoutSubscription{cc: cc}, nil
 }
 
 // EnsureFanoutStream ensures a FANOUT stream exists with appropriate settings.
@@ -514,9 +524,9 @@ func (b *Bus) EnsureFanoutStream(config FanoutStreamConfig) error {
 		return fmt.Errorf("at least one subject is required")
 	}
 
-	jsm := b.c.js
+	ctx := context.Background()
 
-	_, err := jsm.StreamInfo(config.Name)
+	_, err := b.c.js.Stream(ctx, config.Name)
 	if err == nil {
 		return nil
 	}
@@ -534,20 +544,20 @@ func (b *Bus) EnsureFanoutStream(config FanoutStreamConfig) error {
 		maxBytes = 10 * 1024 * 1024
 	}
 
-	streamConfig := &nats.StreamConfig{
+	streamConfig := jetstream.StreamConfig{
 		Name:        config.Name,
 		Description: config.Description,
 		Subjects:    config.Subjects,
-		Retention:   nats.LimitsPolicy,
+		Retention:   jetstream.LimitsPolicy,
 		MaxAge:      maxAge,
 		MaxMsgs:     maxMsgs,
 		MaxBytes:    maxBytes,
-		Storage:     nats.MemoryStorage,
+		Storage:     jetstream.MemoryStorage,
 		Replicas:    1,
-		Discard:     nats.DiscardOld,
+		Discard:     jetstream.DiscardOld,
 	}
 
-	_, err = jsm.AddStream(streamConfig)
+	_, err = b.c.js.CreateStream(ctx, streamConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create stream %s: %w", config.Name, err)
 	}

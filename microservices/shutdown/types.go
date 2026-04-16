@@ -3,6 +3,7 @@ package shutdown
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 )
 
 // Shutdowner is implemented by any component that needs graceful cleanup.
@@ -32,6 +33,7 @@ type shutdownHook struct {
 //	P4 — Caches (TieredCache, in-memory caches)
 //	P5 — Connections (MongoDB, Redis, NATS, ClickHouse)
 type ShutdownManager struct {
-	hooks []shutdownHook
-	mu    sync.Mutex
+	hooks       []shutdownHook
+	mu          sync.Mutex
+	terminating atomic.Bool
 }

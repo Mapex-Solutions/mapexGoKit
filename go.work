@@ -4,4 +4,8 @@ use (
 	./infrastructure
 	./microservices
 	./utils
+
+	// External dependencies from myAIOffice
+	../myAIOffice/workspace_go/packages/contracts
+	../myAIOffice/workspace_go/packages/utils
 )

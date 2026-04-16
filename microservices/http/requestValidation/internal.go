@@ -141,7 +141,7 @@ func validateAndBind(parser func(interface{}) error, dto interface{}) []string {
 		return []string{"Internal error while setting default values"}
 	}
 
-	// Step 3: validate struct using Mapex-Solutions/mapexGoKit/validations package.
+	// Step 3: validate struct using Mapex-Solutions/MapexOS/validations package.
 	if err := validations.ValidateStruct(dto); err != nil {
 		return err
 	}

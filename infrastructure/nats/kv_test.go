@@ -1,14 +1,15 @@
 package natsModel
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
 )
 
-// =============================================================================
-// Unit Tests - KV Types
-// =============================================================================
+/**
+Unit Tests - KV Types
+*/
 
 func TestKVConfig(t *testing.T) {
 	t.Run("default values", func(t *testing.T) {
@@ -97,9 +98,9 @@ func TestKVEntry(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Unit Tests - KV Sentinel Errors
-// =============================================================================
+/**
+Unit Tests - KV Sentinel Errors
+*/
 
 func TestKVErrors(t *testing.T) {
 	t.Run("errors are distinct", func(t *testing.T) {
@@ -134,9 +135,9 @@ func TestKVErrors(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Unit Tests - CreateKeyValue validation
-// =============================================================================
+/**
+Unit Tests - CreateKeyValue validation
+*/
 
 func TestCreateKeyValue_EmptyBucket(t *testing.T) {
 	client := &Client{} // nil connection — we only test bucket validation
@@ -146,9 +147,9 @@ func TestCreateKeyValue_EmptyBucket(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// Integration Tests (require NATS server)
-// =============================================================================
+/**
+Integration Tests (require NATS server)
+*/
 
 func skipIfNoNATSClient(t *testing.T) *Client {
 	t.Helper()
@@ -159,6 +160,12 @@ func skipIfNoNATSClient(t *testing.T) *Client {
 		return nil
 	}
 	return client
+}
+
+// cleanupKVBucket deletes a KV bucket if it exists, ensuring a clean state for tests.
+func cleanupKVBucket(t *testing.T, client *Client, bucket string) {
+	t.Helper()
+	_ = client.js.DeleteKeyValue(context.Background(), bucket)
 }
 
 func TestCreateKeyValue_Integration(t *testing.T) {
@@ -267,6 +274,7 @@ func TestKVCreate_Integration(t *testing.T) {
 		return
 	}
 
+	cleanupKVBucket(t, client, "TEST-KV-CREATE-OP")
 	store, err := client.CreateKeyValue(KVConfig{Bucket: "TEST-KV-CREATE-OP", Replicas: 1})
 	if err != nil {
 		t.Fatalf("CreateKeyValue() error = %v", err)
@@ -406,6 +414,7 @@ func TestKVKeys_Integration(t *testing.T) {
 		return
 	}
 
+	cleanupKVBucket(t, client, "TEST-KV-KEYS")
 	store, err := client.CreateKeyValue(KVConfig{Bucket: "TEST-KV-KEYS", Replicas: 1})
 	if err != nil {
 		t.Fatalf("CreateKeyValue() error = %v", err)
@@ -445,6 +454,7 @@ func TestKVPerStepPattern_Integration(t *testing.T) {
 		return
 	}
 
+	cleanupKVBucket(t, client, "TEST-KV-PERSTEP")
 	store, err := client.CreateKeyValue(KVConfig{Bucket: "TEST-KV-PERSTEP", Replicas: 1})
 	if err != nil {
 		t.Fatalf("CreateKeyValue() error = %v", err)

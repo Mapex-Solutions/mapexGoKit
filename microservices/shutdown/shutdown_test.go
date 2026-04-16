@@ -231,3 +231,38 @@ func TestWaitForSignal_NoHooks(t *testing.T) {
 		t.Fatal("WaitForSignal with no hooks should complete quickly after signal")
 	}
 }
+
+// --- IsShuttingDown ---
+
+func TestIsShuttingDown_FalseByDefault(t *testing.T) {
+	sm := New()
+	if sm.IsShuttingDown() {
+		t.Fatal("expected IsShuttingDown() to return false on a new ShutdownManager")
+	}
+}
+
+func TestIsShuttingDown_TrueAfterTerminating(t *testing.T) {
+	sm := New()
+	sm.terminating.Store(true)
+	if !sm.IsShuttingDown() {
+		t.Fatal("expected IsShuttingDown() to return true after terminating flag set")
+	}
+}
+
+func TestFlagSetBeforeHooksExecute(t *testing.T) {
+	sm := New()
+
+	var flagDuringHook atomic.Bool
+
+	sm.RegisterFunc("check-flag", 0, func(_ context.Context) error {
+		flagDuringHook.Store(sm.IsShuttingDown())
+		return nil
+	})
+
+	sendSignalAfter(50 * time.Millisecond)
+	sm.WaitForSignal(5 * time.Second)
+
+	if !flagDuringHook.Load() {
+		t.Fatal("expected IsShuttingDown() to be true inside hook — flag must be set BEFORE hooks execute")
+	}
+}

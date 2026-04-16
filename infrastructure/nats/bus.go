@@ -1,13 +1,15 @@
 // Package natsadapter maps the ports to your concrete natsModel client.
-// It stays thin: just translate calls to Push/SubscribeWithOptions.
+// It stays thin: just translate calls to Push/StartConsumer.
 package natsModel
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/Mapex-Solutions/mapexGoKit/microservices/logger"
 )
@@ -36,6 +38,7 @@ var _ Subscriber = (*Bus)(nil)
 var _ Fetcher = (*Bus)(nil)
 var _ Fanout = (*Bus)(nil)
 var _ CorePublisher = (*Bus)(nil)
+var _ ScheduleManager = (*Bus)(nil)
 
 // Publish sends a message using struct configuration (new recommended method)
 func (b *Bus) Publish(config PublishConfig) error {
@@ -68,22 +71,37 @@ func (b *Bus) Subscribe(config SubscribeConfig) (func() error, error) {
 
 	logger.Info("[INFRA:NATS] Creating subscription to subject: " + config.Subject)
 
-	sub, err := b.c.SubscribeWithOptions(SubscribeOptions{
-		Stream:       config.Stream,
-		Subject:      config.Subject,
-		Durable:      config.Durable,
-		DeliverGroup: config.Group,
-		Pull:         config.Pull,
-		Handler: func(m *natsgo.Msg) {
-			if err := config.Handler(m.Data); err == nil {
-				_ = m.Ack() // ack only on success
-			}
-		},
+	ctx := context.Background()
+
+	// Ensure stream and consumer exist
+	if err := b.c.createOrGetConsumer(SubscribeOptions{
+		Stream:  config.Stream,
+		Subject: config.Subject,
+		Durable: config.Durable,
+		Pull:    config.Pull,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to ensure stream/consumer: %w", err)
+	}
+
+	// Get consumer handle
+	cons, err := b.c.js.Consumer(ctx, config.Stream, config.Durable)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get consumer: %w", err)
+	}
+
+	// Use Consume for callback-based message handling
+	cc, err := cons.Consume(func(msg jetstream.Msg) {
+		if err := config.Handler(msg.Data()); err == nil {
+			_ = msg.Ack() // ack only on success
+		} else {
+			_ = msg.Nak() // nak on error for redelivery
+		}
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to start consume: %w", err)
 	}
-	return sub.Drain, nil
+
+	return func() error { cc.Drain(); return nil }, nil
 }
 
 // Fetch starts a fetch-based consumer using struct configuration
@@ -187,46 +205,6 @@ func (b *Bus) PublishFanout(ctx context.Context, subject string, data []byte) er
 	return nil
 }
 
-// StartConsumer creates and starts a new managed consumer with automatic goroutine handling.
-// This is the recommended way to create consumers with retry/DLQ support.
-//
-// Parameters:
-//   - opts: Consumer configuration including handler function, retry policy, and DLQ policy
-//
-// Returns:
-//   - *Consumer: Consumer instance for lifecycle management
-//   - error: Any initialization error
-//
-// Example:
-//
-//	consumer, err := bus.StartConsumer(natsModel.ConsumerOptions{
-//	    Stream:       "EVENTS-RAW",
-//	    Subject:      "events.raw",
-//	    Durable:      "events-processor",
-//	    BatchSize:    50,
-//	    FetchTimeout: 5 * time.Second,
-//	    RetryPolicy: &natsModel.RetryPolicy{
-//	        MaxRetries: 5,
-//	        Backoff:    []time.Duration{1*time.Second, 5*time.Second, 15*time.Second},
-//	        AckWait:    30 * time.Second,
-//	    },
-//	    DLQPolicy: &natsModel.DLQPolicy{
-//	        Stream:      "MAPEXOS-DLQ",
-//	        Subject:     "dlq.events.raw",
-//	        ServiceName: "events-service",
-//	        ServiceType: "events",
-//	        EventType:   "raw",
-//	    },
-//	    BatchMessageHandlerV2: func(messages []*natsModel.Message) {
-//	        for _, msg := range messages {
-//	            if err := process(msg.Data); err != nil {
-//	                msg.Nack(err)
-//	            } else {
-//	                msg.Ack()
-//	            }
-//	        }
-//	    },
-//	})
 // PublishCore publishes using core NATS (fire-and-forget, no JetStream ACK).
 // Messages are enqueued in the TCP buffer. Call FlushConnection() after
 // a batch to guarantee delivery in a single TCP roundtrip.
@@ -250,6 +228,74 @@ func (b *Bus) FlushConnection() error {
 	return b.c.FlushConnection()
 }
 
+// PublishScheduled publishes a message with Nats-Schedule headers for delayed delivery.
+// The message is stored in the schedule stream and delivered to TargetSubject at ScheduleAt time.
+// Requires the target stream to have AllowMsgSchedules: true.
+func (b *Bus) PublishScheduled(config ScheduledPublishConfig) error {
+	if config.Subject == "" {
+		return fmt.Errorf("subject is required")
+	}
+	if config.TargetSubject == "" {
+		return fmt.Errorf("target subject is required")
+	}
+
+	data, err := json.Marshal(config.Data)
+	if err != nil {
+		return fmt.Errorf("failed to marshal scheduled payload: %w", err)
+	}
+
+	msg := &natsgo.Msg{
+		Subject: config.Subject,
+		Data:    data,
+		Header:  natsgo.Header{},
+	}
+
+	msg.Header.Set("Nats-Schedule", fmt.Sprintf("@at %s", config.ScheduleAt.UTC().Format(time.RFC3339)))
+	msg.Header.Set("Nats-Schedule-Target", config.TargetSubject)
+
+	for k, v := range config.Headers {
+		msg.Header.Set(k, v)
+	}
+
+	_, err = b.c.js.PublishMsg(context.Background(), msg)
+	if err != nil {
+		return fmt.Errorf("failed to publish scheduled message: %w", err)
+	}
+
+	logger.Debug(fmt.Sprintf("[INFRA:NATS] Scheduled message published: subject=%s target=%s at=%s",
+		config.Subject, config.TargetSubject, config.ScheduleAt.UTC().Format(time.RFC3339)))
+
+	return nil
+}
+
+// PurgeStreamSubject purges all messages matching a subject pattern from a stream.
+// Idempotent: returns nil if no messages match or the stream doesn't exist.
+func (b *Bus) PurgeStreamSubject(streamName, subject string) error {
+	ctx := context.Background()
+
+	stream, err := b.c.js.Stream(ctx, streamName)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			return nil
+		}
+		return fmt.Errorf("failed to get stream %s: %w", streamName, err)
+	}
+
+	if err := stream.Purge(ctx, jetstream.WithPurgeSubject(subject)); err != nil {
+		return fmt.Errorf("failed to purge subject %s from stream %s: %w", subject, streamName, err)
+	}
+
+	return nil
+}
+
+// EnsureStream creates or updates a JetStream stream. Idempotent.
+func (b *Bus) EnsureStream(config jetstream.StreamConfig) error {
+	_, err := b.c.js.CreateOrUpdateStream(context.Background(), config)
+	return err
+}
+
+// StartConsumer creates and starts a new managed consumer with automatic goroutine handling.
+// This is the recommended way to create consumers with retry/DLQ support.
 func (b *Bus) StartConsumer(opts ConsumerOptions) (*Consumer, error) {
 	return b.c.StartConsumer(opts)
 }

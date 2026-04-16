@@ -1,10 +1,11 @@
 package natsModel
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
-	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/Mapex-Solutions/mapexGoKit/microservices/logger"
 )
@@ -47,7 +48,7 @@ Usage:
 	}
 */
 type KVStore struct {
-	kv nats.KeyValue
+	kv jetstream.KeyValue
 }
 
 /* Compile-time interface check */
@@ -71,10 +72,10 @@ func (c *Client) CreateKeyValue(cfg KVConfig) (*KVStore, error) {
 	}
 	storage := cfg.Storage
 	if storage == 0 {
-		storage = nats.FileStorage
+		storage = jetstream.FileStorage
 	}
 
-	kvCfg := &nats.KeyValueConfig{
+	kvCfg := jetstream.KeyValueConfig{
 		Bucket:       cfg.Bucket,
 		Description:  cfg.Description,
 		TTL:          cfg.TTL,
@@ -85,7 +86,7 @@ func (c *Client) CreateKeyValue(cfg KVConfig) (*KVStore, error) {
 		Storage:      storage,
 	}
 
-	kv, err := c.js.CreateKeyValue(kvCfg)
+	kv, err := c.js.CreateOrUpdateKeyValue(context.Background(), kvCfg)
 	if err != nil {
 		return nil, fmt.Errorf("kv: failed to create bucket %q: %w", cfg.Bucket, err)
 	}
@@ -96,9 +97,9 @@ func (c *Client) CreateKeyValue(cfg KVConfig) (*KVStore, error) {
 
 // Get retrieves a value by key. Returns ErrKVKeyNotFound if the key doesn't exist.
 func (s *KVStore) Get(key string) (*KVEntry, error) {
-	entry, err := s.kv.Get(key)
+	entry, err := s.kv.Get(context.Background(), key)
 	if err != nil {
-		if errors.Is(err, nats.ErrKeyNotFound) {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil, ErrKVKeyNotFound
 		}
 		return nil, fmt.Errorf("kv: get %q: %w", key, err)
@@ -113,7 +114,7 @@ func (s *KVStore) Get(key string) (*KVEntry, error) {
 
 // Put stores a value, creating or overwriting the key. Returns the new revision.
 func (s *KVStore) Put(key string, value []byte) (uint64, error) {
-	rev, err := s.kv.Put(key, value)
+	rev, err := s.kv.Put(context.Background(), key, value)
 	if err != nil {
 		return 0, fmt.Errorf("kv: put %q: %w", key, err)
 	}
@@ -123,9 +124,9 @@ func (s *KVStore) Put(key string, value []byte) (uint64, error) {
 // Create stores a value ONLY IF the key doesn't exist.
 // Returns ErrKVKeyExists if the key already exists.
 func (s *KVStore) Create(key string, value []byte) (uint64, error) {
-	rev, err := s.kv.Create(key, value)
+	rev, err := s.kv.Create(context.Background(), key, value)
 	if err != nil {
-		if errors.Is(err, nats.ErrKeyExists) {
+		if errors.Is(err, jetstream.ErrKeyExists) {
 			return 0, ErrKVKeyExists
 		}
 		return 0, fmt.Errorf("kv: create %q: %w", key, err)
@@ -136,16 +137,9 @@ func (s *KVStore) Create(key string, value []byte) (uint64, error) {
 // Update stores a value ONLY IF the current revision matches expectedRevision (CAS).
 // Returns ErrKVCASConflict if the revision doesn't match (another writer modified the key).
 func (s *KVStore) Update(key string, value []byte, expectedRevision uint64) (uint64, error) {
-	rev, err := s.kv.Update(key, value, expectedRevision)
+	rev, err := s.kv.Update(context.Background(), key, value, expectedRevision)
 	if err != nil {
-		/* NATS KV returns a JetStream API error (code 10071: wrong last sequence)
-		   when the expected revision doesn't match. We also check for ErrKeyExists
-		   which some nats.go versions return for CAS failures. */
-		var apiErr *nats.APIError
-		if errors.As(err, &apiErr) && apiErr.ErrorCode == 10071 {
-			return 0, ErrKVCASConflict
-		}
-		if errors.Is(err, nats.ErrKeyExists) {
+		if errors.Is(err, jetstream.ErrKeyExists) {
 			return 0, ErrKVCASConflict
 		}
 		return 0, fmt.Errorf("kv: update %q (rev=%d): %w", key, expectedRevision, err)
@@ -155,9 +149,9 @@ func (s *KVStore) Update(key string, value []byte, expectedRevision uint64) (uin
 
 // Delete soft-deletes a key (preservable in history). Returns ErrKVKeyNotFound if not found.
 func (s *KVStore) Delete(key string) error {
-	err := s.kv.Delete(key)
+	err := s.kv.Delete(context.Background(), key)
 	if err != nil {
-		if errors.Is(err, nats.ErrKeyNotFound) {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return ErrKVKeyNotFound
 		}
 		return fmt.Errorf("kv: delete %q: %w", key, err)
@@ -167,7 +161,7 @@ func (s *KVStore) Delete(key string) error {
 
 // Purge removes a key and all its historical revisions.
 func (s *KVStore) Purge(key string) error {
-	err := s.kv.Purge(key)
+	err := s.kv.Purge(context.Background(), key)
 	if err != nil {
 		return fmt.Errorf("kv: purge %q: %w", key, err)
 	}
@@ -176,12 +170,16 @@ func (s *KVStore) Purge(key string) error {
 
 // Keys returns all keys in the bucket. Use sparingly — scans entire bucket.
 func (s *KVStore) Keys() ([]string, error) {
-	keys, err := s.kv.Keys()
+	lister, err := s.kv.ListKeys(context.Background())
 	if err != nil {
-		if errors.Is(err, nats.ErrNoKeysFound) {
+		if errors.Is(err, jetstream.ErrNoKeysFound) {
 			return []string{}, nil
 		}
 		return nil, fmt.Errorf("kv: keys: %w", err)
+	}
+	var keys []string
+	for key := range lister.Keys() {
+		keys = append(keys, key)
 	}
 	return keys, nil
 }

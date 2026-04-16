@@ -7,20 +7,24 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
-// Alias for nats.Msg to simplify imports
+// Alias for nats.Msg — core NATS message type used in publish operations
 type Msg = nats.Msg
 
-// Alias for nats.Option to simplify imports
+// Alias for nats.Option — connection option type
 type Option = nats.Option
 
-// Alias for nats.Options to simplify imports
+// Alias for nats.Options — connection options struct
 type Options = nats.Options
+
+// Alias for jetstream.StorageType — storage backend type (FileStorage, MemoryStorage)
+type StorageType = jetstream.StorageType
 
 type Client struct {
 	nc *nats.Conn
-	js nats.JetStreamContext
+	js jetstream.JetStream
 }
 
 type Config struct {
@@ -103,7 +107,7 @@ type MessageHandler func(data []byte, index int, headers map[string][]string) er
 type BatchMessage struct {
 	Data    []byte              // The message payload
 	Headers map[string][]string // Message headers
-	msg     *Msg                // Internal reference for ACK/NAK
+	msg     jetstream.Msg       // Internal reference for ACK/NAK
 }
 
 // Ack acknowledges the message (removes from queue)
@@ -484,8 +488,24 @@ type FanoutStreamConfig struct {
 
 // FanoutSubscription represents an active ephemeral FANOUT subscription.
 type FanoutSubscription struct {
-	Sub      *nats.Subscription
+	Sub      *nats.Subscription      // Legacy: kept for core NATS subscriptions
+	cc       jetstream.ConsumeContext // New: used by jetstream consumers
 	StopOnce sync.Once
+}
+
+/**
+Schedule Types
+*/
+
+// ScheduledPublishConfig configures a NATS JetStream scheduled message publish.
+// The message is stored in the stream and delivered to TargetSubject at ScheduleAt time.
+// Uses Nats-Schedule: @at {RFC3339} header (ADR-51, requires AllowMsgSchedules on stream).
+type ScheduledPublishConfig struct {
+	Subject       string            // Required: subject in the schedule stream
+	TargetSubject string            // Required: where NATS delivers the message at ScheduleAt time
+	ScheduleAt    time.Time         // Required: when to deliver (UTC, RFC3339)
+	Data          any               // Required: message payload (will be JSON marshaled)
+	Headers       map[string]string // Optional: additional headers
 }
 
 /**
@@ -518,8 +538,8 @@ type KVConfig struct {
 	// Default: 1 (single node). Production: 3 (cluster HA).
 	Replicas int
 
-	// Storage selects the storage backend. Default: nats.FileStorage (disk-backed).
-	Storage nats.StorageType
+	// Storage selects the storage backend. Default: jetstream.FileStorage (disk-backed).
+	Storage StorageType
 }
 
 // KVEntry represents a single entry retrieved from a NATS KV bucket.

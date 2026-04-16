@@ -100,7 +100,7 @@ func (c *Client) Push(opts PushOptions) error {
 		}
 	}
 
-	_, err := c.js.PublishMsg(msg)
+	_, err := c.js.PublishMsg(context.Background(), msg)
 	return err
 }
 

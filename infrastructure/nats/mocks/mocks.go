@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/mock"
 )
 
-// ============================================================================
-//                              MOCK FANOUT
-// ============================================================================
+/**
+Mock Fanout
+*/
 
 // MockFanout implements natsModel.Fanout interface for testing.
 // Use this mock for services that publish FANOUT messages.
@@ -49,9 +49,9 @@ func (m *MockFanout) EnsureFanoutStream(config natsModel.FanoutStreamConfig) err
 // Compile-time check
 var _ natsModel.Fanout = (*MockFanout)(nil)
 
-// ============================================================================
-//                            MOCK SUBSCRIBER
-// ============================================================================
+/**
+Mock Subscriber
+*/
 
 // MockSubscriber implements natsModel.Subscriber interface for testing.
 // Use this mock for consumers that use Subscribe pattern.
@@ -76,9 +76,9 @@ func (m *MockSubscriber) Subscribe(config natsModel.SubscribeConfig) (func() err
 // Compile-time check
 var _ natsModel.Subscriber = (*MockSubscriber)(nil)
 
-// ============================================================================
-//                            MOCK PUBLISHER
-// ============================================================================
+/**
+Mock Publisher
+*/
 
 // MockPublisher implements natsModel.Publisher interface for testing.
 // Use this mock for services that publish standard messages.
@@ -100,9 +100,9 @@ func (m *MockPublisher) Publish(config natsModel.PublishConfig) error {
 // Compile-time check
 var _ natsModel.Publisher = (*MockPublisher)(nil)
 
-// ============================================================================
-//                            MOCK FETCHER
-// ============================================================================
+/**
+Mock Fetcher
+*/
 
 // MockFetcher implements natsModel.Fetcher interface for testing.
 // Use this mock for consumers that use Fetch pattern.
@@ -127,9 +127,9 @@ func (m *MockFetcher) Fetch(config natsModel.FetchConfig) (func() error, error) 
 // Compile-time check
 var _ natsModel.Fetcher = (*MockFetcher)(nil)
 
-// ============================================================================
-//                       MOCK CONNECTION PROVIDER
-// ============================================================================
+/**
+Mock Connection Provider
+*/
 
 // MockConnectionProvider implements natsModel.ConnectionProvider interface for testing.
 // Use this mock for consumers that need direct NATS connection (e.g., Auth Callout).
@@ -154,9 +154,9 @@ func (m *MockConnectionProvider) GetConn() *natsgo.Conn {
 // Compile-time check
 var _ natsModel.ConnectionProvider = (*MockConnectionProvider)(nil)
 
-// ============================================================================
-//                          MOCK CORE PUBLISHER
-// ============================================================================
+/**
+Mock Core Publisher
+*/
 
 // MockCorePublisher implements natsModel.CorePublisher interface for testing.
 // Use this mock for high-throughput consumers that use fire-and-forget publishing.
@@ -185,9 +185,9 @@ func (m *MockCorePublisher) FlushConnection() error {
 // Compile-time check
 var _ natsModel.CorePublisher = (*MockCorePublisher)(nil)
 
-// ============================================================================
-//                         MOCK COMBINED (BUS)
-// ============================================================================
+/**
+Mock Combined (Bus)
+*/
 
 // MockBus implements all NATS interfaces for testing.
 // Use this when you need a mock that implements multiple interfaces.
@@ -276,9 +276,9 @@ var _ natsModel.Fetcher = (*MockBus)(nil)
 var _ natsModel.ConnectionProvider = (*MockBus)(nil)
 var _ natsModel.CorePublisher = (*MockBus)(nil)
 
-// ============================================================================
-//                        MOCK KEY VALUE STORE
-// ============================================================================
+/**
+Mock Key Value Store
+*/
 
 // MockKeyValueStore implements natsModel.KeyValueStore interface for testing.
 // Use this mock for services that use NATS KV for state persistence (e.g., workflow runtime).

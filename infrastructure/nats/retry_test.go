@@ -25,8 +25,8 @@ func TestDefaultRetryPolicy(t *testing.T) {
 	if policy.Backoff[4] != 10*time.Minute {
 		t.Errorf("expected backoff[4] = 10m, got %v", policy.Backoff[4])
 	}
-	if policy.AckWait != 30*time.Second {
-		t.Errorf("expected AckWait 30s, got %v", policy.AckWait)
+	if policy.AckWait != 5*time.Minute {
+		t.Errorf("expected AckWait 5m, got %v", policy.AckWait)
 	}
 }
 

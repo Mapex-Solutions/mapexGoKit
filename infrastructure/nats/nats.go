@@ -6,6 +6,7 @@ import (
 
 	"github.com/Mapex-Solutions/mapexGoKit/microservices/logger"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // New creates a new NATS client connection and initializes the JetStream context.
@@ -27,7 +28,7 @@ func New(c Config) (*Client, error) {
 		return nil, err
 	}
 
-	js, err := nc.JetStream()
+	js, err := jetstream.New(nc)
 	if err != nil {
 		return nil, err
 	}

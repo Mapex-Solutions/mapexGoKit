@@ -7,11 +7,12 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
-// =============================================================================
-// Test Configuration
-// =============================================================================
+/**
+Test Configuration
+*/
 
 func getTestConfig() Config {
 	url := os.Getenv("NATS_TEST_URL")
@@ -51,9 +52,24 @@ func skipIfNoNATS(t *testing.T) *Bus {
 	return NewBus(client)
 }
 
-// =============================================================================
-// Unit Tests - Types
-// =============================================================================
+// ensureTestStream creates (or recreates) a stream for integration tests.
+func ensureTestStream(t *testing.T, bus *Bus, name string, subjects []string) {
+	t.Helper()
+	ctx := context.Background()
+	_ = bus.c.js.DeleteStream(ctx, name)
+	_, err := bus.c.js.CreateStream(ctx, jetstream.StreamConfig{
+		Name:     name,
+		Subjects: subjects,
+		Storage:  jetstream.MemoryStorage,
+	})
+	if err != nil {
+		t.Fatalf("ensureTestStream(%s) error = %v", name, err)
+	}
+}
+
+/**
+Unit Tests - Types
+*/
 
 func TestPublishConfig(t *testing.T) {
 	t.Run("default values", func(t *testing.T) {
@@ -180,9 +196,9 @@ func TestConsumerOptions(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Unit Tests - RetryPolicy
-// =============================================================================
+/**
+Unit Tests - RetryPolicy
+*/
 
 func TestRetryPolicy_GetMaxDeliver(t *testing.T) {
 	tests := []struct {
@@ -264,9 +280,9 @@ func TestRetryPolicy_GetAckWait(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Unit Tests - FANOUT Types
-// =============================================================================
+/**
+Unit Tests - FANOUT Types
+*/
 
 func TestFanoutStreamConfig(t *testing.T) {
 	t.Run("with all fields", func(t *testing.T) {
@@ -324,9 +340,9 @@ func TestFanoutHandler(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Unit Tests - Errors
-// =============================================================================
+/**
+Unit Tests - Errors
+*/
 
 func TestErrors(t *testing.T) {
 	errors := []error{
@@ -348,9 +364,9 @@ func TestErrors(t *testing.T) {
 	}
 }
 
-// =============================================================================
-// Unit Tests - BatchMessage
-// =============================================================================
+/**
+Unit Tests - BatchMessage
+*/
 
 func TestBatchMessage(t *testing.T) {
 	t.Run("struct fields", func(t *testing.T) {
@@ -371,9 +387,9 @@ func TestBatchMessage(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Unit Tests - DLQMessage
-// =============================================================================
+/**
+Unit Tests - DLQMessage
+*/
 
 func TestDLQMessage(t *testing.T) {
 	t.Run("all fields", func(t *testing.T) {
@@ -408,9 +424,9 @@ func TestDLQMessage(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Integration Tests (require NATS server)
-// =============================================================================
+/**
+Integration Tests (require NATS server)
+*/
 
 func TestNewClient_Integration(t *testing.T) {
 	bus := skipIfNoNATS(t)
@@ -434,6 +450,8 @@ func TestPublish_Integration(t *testing.T) {
 		return
 	}
 
+	ensureTestStream(t, bus, "TEST-PUBLISH-INT", []string{"test.publish.integration"})
+
 	t.Run("publish with struct config", func(t *testing.T) {
 		err := bus.Publish(PublishConfig{
 			Subject: "test.publish.integration",
@@ -452,6 +470,7 @@ func TestPublishFanout_Integration(t *testing.T) {
 		return
 	}
 
+	ensureTestStream(t, bus, "TEST-FANOUT-PUB-INT", []string{"test.fanout.integration"})
 	ctx := context.Background()
 
 	t.Run("publish fanout", func(t *testing.T) {
@@ -607,9 +626,9 @@ func TestSubscribeFanout_Integration(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Unit Tests - PublishCore Types
-// =============================================================================
+/**
+Unit Tests - PublishCore Types
+*/
 
 func TestPublishCoreOptions(t *testing.T) {
 	t.Run("all fields", func(t *testing.T) {
@@ -684,9 +703,9 @@ func TestPublishCoreConfig(t *testing.T) {
 	})
 }
 
-// =============================================================================
-// Integration Tests - PublishCore (require NATS server)
-// =============================================================================
+/**
+Integration Tests - PublishCore (require NATS server)
+*/
 
 func TestPublishCore_Integration(t *testing.T) {
 	bus := skipIfNoNATS(t)
@@ -825,5 +844,71 @@ func TestFanoutSubscription_Stop(t *testing.T) {
 	err = sub.Stop()
 	if err != nil {
 		t.Errorf("Stop() second call error = %v", err)
+	}
+}
+
+/**
+Schedule Tests — verify jetstream API exposes AllowMsgSchedules and Nats-Schedule header
+*/
+
+func TestStreamConfig_AllowMsgSchedules(t *testing.T) {
+	cfg := jetstream.StreamConfig{
+		Name:              "TEST-SCHEDULE",
+		Subjects:          []string{"test.schedule.>"},
+		AllowMsgSchedules: true,
+	}
+
+	if !cfg.AllowMsgSchedules {
+		t.Fatal("AllowMsgSchedules should be true")
+	}
+}
+
+func TestPushOptions_NatsScheduleHeader(t *testing.T) {
+	opts := PushOptions{
+		Subject: "test.schedule.subject",
+		Data:    []byte(`{"key":"value"}`),
+		Headers: map[string]string{
+			"Nats-Schedule": "@at 2026-01-01T00:00:00Z",
+		},
+	}
+
+	// Verify header is set correctly
+	if opts.Headers["Nats-Schedule"] != "@at 2026-01-01T00:00:00Z" {
+		t.Errorf("Nats-Schedule header = %q, want '@at 2026-01-01T00:00:00Z'",
+			opts.Headers["Nats-Schedule"])
+	}
+}
+
+func TestPush_NatsScheduleHeader_Integration(t *testing.T) {
+	bus := skipIfNoNATS(t)
+	if bus == nil {
+		return
+	}
+
+	// Create a stream that allows scheduled messages
+	err := bus.c.js.DeleteStream(context.Background(), "TEST-SCHEDULE-HDR")
+	_ = err // Ignore if not exists
+
+	_, err = bus.c.js.CreateStream(context.Background(), jetstream.StreamConfig{
+		Name:              "TEST-SCHEDULE-HDR",
+		Subjects:          []string{"test.schedule.hdr.>"},
+		AllowMsgSchedules: true,
+		Storage:           jetstream.MemoryStorage,
+	})
+	if err != nil {
+		t.Fatalf("CreateStream() error = %v", err)
+	}
+	defer bus.c.js.DeleteStream(context.Background(), "TEST-SCHEDULE-HDR")
+
+	// Publish with Nats-Schedule header
+	err = bus.c.Push(PushOptions{
+		Subject: "test.schedule.hdr.test",
+		Data:    []byte(`{"scheduled":true}`),
+		Headers: map[string]string{
+			"Nats-Schedule": "@at 2099-01-01T00:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Errorf("Push() with Nats-Schedule header error = %v", err)
 	}
 }
