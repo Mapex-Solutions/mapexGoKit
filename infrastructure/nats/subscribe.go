@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -60,12 +61,19 @@ func (c *Client) createOrGetConsumer(opts SubscribeOptions) error {
 		info := stream.CachedInfo()
 		updatedConfig := info.Config
 
-		// Ensure our subject is captured
+		// Ensure our subject is captured (exact match or wildcard coverage)
 		found := false
 		for _, s := range info.Config.Subjects {
 			if s == opts.Subject {
 				found = true
 				break
+			}
+			if strings.HasSuffix(s, ".>") {
+				prefix := strings.TrimSuffix(s, ">")
+				if strings.HasPrefix(opts.Subject, prefix) {
+					found = true
+					break
+				}
 			}
 		}
 		if !found {
