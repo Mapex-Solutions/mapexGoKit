@@ -264,6 +264,73 @@ Get(key) chamado
 6. **Compartilhe recursos de sistema**: Use orgId `mapexos_public` para templates compartilhados.
 7. **Monitore estatísticas**: Acompanhe taxas de hit para ajustar configuração.
 
+## Performance: NVMe vs Redis (Por que isso importa em larga escala)
+
+Com 200M+ assets, a pergunta "por que não usar Redis em tudo?" aparece com frequência. A resposta curta: **em larga escala, o salto de rede até um cluster Redis remoto é o que domina a latência** — não a busca no cache em si. Uma camada NVMe local opera na mesma faixa de latência que um Redis em rede, enquanto a camada quente em RAM (L0) cobre o cenário de chave concorrente onde o Redis venceria.
+
+### Orçamento de latência (2026)
+
+| Camada | Latência típica | Notas |
+|---|---|---|
+| DRAM (local) | ~80 ns | Baseline — o que o L0 (ristretto) acessa internamente |
+| Pool de memória CXL Type-3 | ~200–500 ns | ~2× DDR5 local; em produção no Azure desde Nov/2025 |
+| **L0 — ristretto (RAM)** | **~50 µs** (TieredCache) | Inclui política de admissão, sharding, verificação de TTL |
+| NVMe Gen5 enterprise (ex: Micron 7500 MAX) | ~70 µs típica, p99 ~80 µs | Random read 4 KB, nível de device |
+| NVMe-oF (NVMe via rede) | ~20–30 µs | Próximo do NVMe local |
+| **L1 — NVMe local (TieredCache)** | **~500 µs** | Inclui caminho hash-shard + open + read + decode |
+| Redis via Unix socket (mesmo host) | ~30 µs | Apenas se colocado no mesmo host |
+| Redis via 1 GbE | ~200 µs | Rede domina |
+| NVMe Gen5 p99 sob carga | ~0,75 ms | vs 7,5 ms em SATA — "10× menor tail latency" |
+| L2 — MinIO/S3 | ~5–50 ms | Camada fria |
+| SATA SSD | ~100–200 µs | Referência |
+| Disco mecânico | ~5–10 ms | Referência |
+
+### Onde o Redis ainda vence (e como o TieredCache resolve)
+
+| Vantagem do Redis | Mitigação no TieredCache |
+|---|---|
+| ~33% mais throughput de leitura concorrente que NVMe (hotspots de chave única) | **L0 (ristretto)** atende chaves quentes em DRAM a ~50 µs — vantagem de leitura concorrente do Redis desaparece |
+| ~41% mais throughput de escrita (sem fsync/flush) | Cache é **read-mostly**; escritas vão para L2 (MinIO) como fonte da verdade, propagadas via invalidação NATS FANOUT |
+| Escala horizontal de cluster | TieredCache escala **linearmente com instâncias do serviço** (sem cache compartilhado para dimensionar) |
+| Filas de jobs / pub-sub | Fora de escopo — TieredCache é cache, não broker. NATS cuida das responsabilidades de broker |
+
+### O que mudou em 2026 (e o que não mudou)
+
+- **Latência de device NVMe não melhorou significativamente** desde 2019 — random reads de 4 KB continuam em ~20–70 µs. Os ganhos de Gen5/Gen6 estão em **throughput sequencial** e **IOPS**, não em latência de leitura aleatória.
+- **Tail latency melhorou** — NVMe enterprise moderno (Micron 7500 MAX, ScaleFlux CSD5310) entrega p99 ~80 µs e consistência "sub-1 ms 6×9", resolvendo a preocupação histórica de "NVMe é rápido em média mas instável sob carga".
+- **CXL entrou em produção** — Azure lançou as primeiras instâncias cloud com CXL em Novembro/2025. Memória CXL Type-3 com latência load-to-use de ~200–500 ns cria uma nova camada entre DRAM e NVMe que pode futuramente se encaixar acima do L1.
+- **Rede já era o gargalo do Redis** — a própria documentação do Redis afirma: *"Redis throughput is limited by the network well before being limited by the CPU."* Isso não mudou.
+
+### Caveat honesto: o que monitorar
+
+NVMe vence em **média**, mas é em **p99/p99.9 sob carga mista de read+write+fsync** que pode degradar se o controlador, filesystem ou comportamento de flush não estiverem bem dimensionados. Acompanhe:
+
+- p99 de leitura no L1 (alertar se > 1 ms sustentado)
+- Custo de fsync do filesystem durante escritas pesadas
+- Throttling térmico do controlador em workloads sustentadas
+
+### Referências (2025–2026)
+
+- [Hacker News — "Isn't Redis just a lot less relevant these days since enterprise NVMe storage is…" (discussão 2026)](https://news.ycombinator.com/item?id=46616513)
+- [OneUptime — How to Estimate Redis Hardware Requirements (Mar/2026)](https://oneuptime.com/blog/post/2026-03-31-redis-estimate-hardware-requirements/view)
+- [ServerMall — PCIe Gen4/Gen5 in Servers: Bandwidth, Limits, Bottlenecks in 2026](https://servermall.com/blog/pcie-gen4-gen5-bandwidth-and-bottlenecks/)
+- [StorageNewsletter — Validation of PCIe Gen5 NVMe Storage Expansion Adapters (Fev/2026)](https://www.storagenewsletter.com/2026/02/06/highpoint-technologies-validation-of-pcie-gen5-nvme-storage-expansion-adapters-with-scaleflux-csd5310-series-enterprise-ssds/)
+- [Newegg Insider — PCIe 5.0 SSDs in 2026: Speed, Performance & Best Buys](https://www.newegg.com/insider/breaking-the-speed-barrier-a-complete-guide-to-pcie-5-0-ssds-in-2026/)
+- [Tom's Hardware — Best SSDs 2026](https://www.tomshardware.com/reviews/best-ssds,3891.html)
+- [Tech-Insider — SSD vs HDD 2026: 14,500 MB/s vs 285 MB/s (testado)](https://tech-insider.org/ssd-vs-hdd-2026/)
+- [ServerMall — CXL in 2026: Server Memory Expansion & Pooling](https://servermall.com/blog/cxl-in-2026-memory-expansion-and-pooling/)
+- [KAD — CXL Goes Mainstream: The Memory Fabric Era in 2026](https://www.kad8.com/hardware/cxl-opens-a-new-era-of-memory-expansion/)
+- [Colobird — CXL 3.0 Memory Pooling on Dedicated Servers: 2026 Gains](https://www.colobird.com/blogs/cxl-3-memory-pooling-dedicated-servers/)
+- [CXL Consortium — Q3 2025 Webinar: How CXL Transforms Server Memory Infrastructure (PDF)](https://computeexpresslink.org/wp-content/uploads/2025/10/CXL_Q3-2025-Webinar_FINAL.pdf)
+- [Introl — CXL 4.0 Infrastructure Planning Guide (2025)](https://introl.com/blog/cxl-4-0-infrastructure-planning-guide-memory-pooling-2025)
+- [Corewave Labs — Persistent Memory vs RAM (2025): CXL & Post-Optane Guide](https://corewavelabs.com/persistent-memory-vs-ram-cxl/)
+- [USENIX OSDI '24 — Managing Memory Tiers with CXL in Virtualized Environments (PDF)](https://www.usenix.org/system/files/osdi24-zhong-yuhong.pdf)
+- [simplyblock — What Is NVMe Latency? Performance Benchmarks Explained](https://www.simplyblock.io/glossary/nvme-latency/)
+- [Micron 7500 MAX — Perfil de latência de NVMe enterprise (p99 ~80 µs)](https://openmetal.io/resources/blog/micron-max-7500-nvme-enterprise-storage-details-and-performance/)
+- [Redis docs — Benchmarks (rede como gargalo primário)](https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/benchmarks/)
+- [Redis docs — Diagnosing latency issues](https://redis.io/docs/latest/operate/oss_and_stack/management/optimization/latency/)
+- [maxcluster — Application cache benchmark: NVMe SSD vs Redis vs Memcached](https://maxcluster.de/en/blog/2019/09/redis-part-2-application-cache-benchmark)
+
 ## Registros de Decisão de Arquitetura
 
 ### Por que não Redis SharedCache?

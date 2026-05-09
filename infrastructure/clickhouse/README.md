@@ -1,325 +1,292 @@
-# ClickHouse Infrastructure Package
+# clickhouse — ClickHouse client, manager, and generic table layer
 
-This package provides an abstraction layer for interacting with ClickHouse, similar to the `mongoModel` package for MongoDB.
+Three cooperating subpackages built on top of [`ClickHouse/clickhouse-go/v2`](https://github.com/ClickHouse/clickhouse-go):
 
-## Structure
+| Path | Package | Role |
+|---|---|---|
+| `clickhouse/` (root) | `clickhouseModel` | Minimal `Client` wrapper — open + ping + raw `driver.Conn` access |
+| `clickhouse/manager/` | `chManager` | Connection-lifecycle manager with health monitoring and reconnect |
+| `clickhouse/model/` | `chModel` | Generic `Table[T]` + `QueryBuilder` + reflection-based column mapping |
 
-```
-clickhouse/
-├── manager/     # Connection management with health monitoring
-│   ├── manager.go
-│   └── types.go
-├── model/       # Generic ORM with reflection and query builder
-│   ├── model.go
-│   ├── methods.go
-│   ├── query_builder.go
-│   ├── reflection.go
-│   ├── types.go
-│   └── utils.go
-└── README.md
-```
+Common across all three: native protocol port `9000`, LZ4 compression, `[INFRA:CLICKHOUSE]` log prefix.
 
-## Manager
+## Root: `clickhouseModel`
 
-The `manager` is responsible for managing the ClickHouse connection, including:
-- Connection with automatic retry
-- Background health monitoring
-- Connection status via atomic bool
+Minimum viable wrapper. Use this when you need a `driver.Conn` and don't want the manager's lifecycle features.
 
-### Usage
+### Config
 
 ```go
-import chManager "github.com/Mapex-Solutions/MapexOS/infrastructure/clickhouse/manager"
-
-// Create instance with configuration
-ch, err := chManager.New(chManager.Config{
-    Host:            "localhost",
-    Port:            9000,
-    Database:        "mapexos",
-    Username:        "default",
-    Password:        "password",
-    EnableMonitor:   true,
-    MonitorInterval: 30 * time.Second,
-})
-if err != nil {
-    log.Fatal(err)
-}
-
-// Check connection status
-if ch.IsConnected() {
-    fmt.Println("Connected to ClickHouse")
-}
-
-// Get raw connection for direct use
-conn := ch.GetConn()
-
-// Get health status (for /health endpoints)
-status := ch.GetHealthStatus()
-```
-
-## Model (chModel)
-
-The `model` provides a generic reflection-based ORM for CRUD operations with ClickHouse.
-
-### Defining Entities
-
-Use the `ch:` tag to map struct fields to ClickHouse columns:
-
-```go
-type RawEvent struct {
-    // Timestamp should be the first field (used for partitioning)
-    Timestamp     time.Time              `ch:"timestamp" json:"timestamp"`
-    ThreadId      string                 `ch:"thread_id" json:"threadId"`
-    OrgId         string                 `ch:"org_id" json:"orgId"`
-    PathKey       string                 `ch:"path_key" json:"pathKey"`
-    Source        string                 `ch:"source" json:"source"`
-
-    // Map/slice fields are automatically serialized as JSON
-    Payload       map[string]interface{} `ch:"payload" json:"payload"`
-    Metadata      map[string]interface{} `ch:"metadata" json:"metadata"`
-
-    RetentionDays uint16                 `ch:"retention_days" json:"retentionDays"`
+type Config struct {
+    Host, Database, Username, Password string
+    Port                                int
 }
 ```
 
-### Creating a Table
+### Surface
 
 ```go
-import chModel "github.com/Mapex-Solutions/MapexOS/infrastructure/clickhouse/model"
+func New(cfg Config) (*Client, error)
+func (c *Client) GetConn() driver.Conn
+```
 
-// Create table instance
-table, err := chModel.NewTable[RawEvent](conn, "events_raw", chModel.TableConfig{
-    TimestampField: "timestamp",
-    DefaultOrder:   "DESC",
-})
-if err != nil {
-    log.Fatal(err)
+`New` opens the connection (LZ4 compression on) and pings with a **2 s** timeout. Errors are wrapped: `clickhouse connection failed: %w` or `clickhouse ping failed: %w`. Logs `[INFRA:CLICKHOUSE] Initialized successfully`.
+
+## Manager: `chManager`
+
+Long-lived manager that owns a connection, tracks health, and reconnects in the background.
+
+### Config
+
+```go
+type Config struct {
+    Host            string        // required
+    Port            int           // default 9000
+    Database        string        // required
+    Username        string        // required
+    Password        string        // (not validated by New, despite ErrMissingConfig text)
+    MaxOpenConns    int           // default 10
+    MaxIdleConns    int           // default 5
+    EnableMonitor   bool
+    MonitorInterval time.Duration // default 10s
 }
 ```
 
-### Insert Operations
+### Validation
+
+`New` returns `ErrMissingConfig` when `Host`, `Database` or `Username` is empty. **The message reads "host, database, username, and password are required"** but the code does not actually check `Password` — it is accepted empty.
+
+### Connection (`internals.go`)
+
+| Setting | Value |
+|---|---|
+| Compression | `LZ4` |
+| `Settings: max_execution_time` | `60` |
+| `DialTimeout` | `DefaultConnectTimeout` (5 s) |
+| `MaxOpenConns` / `MaxIdleConns` | from cfg, defaults `10` / `5` |
+| `ConnMaxLifetime` | `1 hour` |
+| Ping timeout | `DefaultPingTimeout` (3 s) |
+
+### Background monitor
+
+`startMonitor()` ticks at `MonitorInterval`. On every tick it pings; on failure it logs and calls `connect()` to reconnect. On success it stores the latency in `m.lastLatency`. The monitor is **only started if `Config.EnableMonitor == true`**.
+
+### Methods
+
+| Method | Notes |
+|---|---|
+| `IsConnected() bool` | atomic, lock-free |
+| `GetConn() driver.Conn` | nil until first successful connect — gate with `IsConnected()` |
+| `GetDatabase() string` | the configured DB |
+| `GetConfig() Config` | password is masked as `"***"` |
+| `Health(ctx) HealthStatus` | live ping when `ctx != nil`; updates `Connected` + `ErrorMessage` |
+| `LastLatency() int64` | last ping latency in ms |
+| `Close() error` | sets `isConnected=false` and closes the connection |
+
+### `HealthStatus`
 
 ```go
-// Single insert
-event := &RawEvent{
-    Timestamp: time.Now(),
-    ThreadId:  "ds-123",
-    OrgId:     "org-456",
-    PathKey:   "org-456/site-1/device-1",
-    Source:    "http_gateway",
-    Payload:   map[string]interface{}{"temperature": 25.5},
-    Metadata:  map[string]interface{}{"ip": "192.168.1.1"},
-}
-err := table.Insert(ctx, event)
-
-// Batch insert (optimized for large volumes)
-events := []*RawEvent{event1, event2, event3}
-err := table.InsertBatch(ctx, events)
-```
-
-### Query Operations
-
-#### FindByOffset (Simple Pagination)
-
-```go
-// Simple filters (equality)
-filters := chModel.Map{
-    "org_id": "org-456",
-    "source": "http_gateway",
-}
-
-pagination := &chModel.PaginationOpts{
-    Page:    1,
-    PerPage: 50,
-}
-
-result, err := table.FindByOffset(ctx, filters, pagination, "timestamp:desc")
-// result.Items      → []RawEvent
-// result.Pagination → {Page, PerPage, TotalItems, TotalPages}
-```
-
-#### FindWithFilters (Advanced Filters)
-
-```go
-filters := []chModel.Filter{
-    // Equality
-    {Field: "org_id", Operator: chModel.OpEqual, Value: "org-456"},
-
-    // LIKE (for pathKey with wildcard)
-    {Field: "path_key", Operator: chModel.OpLike, Value: "org-456/site-1%"},
-
-    // Date range with BETWEEN
-    {
-        Field:    "timestamp",
-        Operator: chModel.OpBetween,
-        Value:    startTime,    // time.Time
-        EndValue: endTime,      // time.Time
-    },
-
-    // Greater than or equal
-    {Field: "retention_days", Operator: chModel.OpGreaterEqual, Value: 7},
-
-    // IN (list of values)
-    {Field: "source", Operator: chModel.OpIn, Value: []string{"http_gateway", "mqtt_gateway"}},
-}
-
-result, err := table.FindWithFilters(ctx, filters, pagination, "timestamp:desc")
-```
-
-### Available Operators
-
-| Operator | Description | Example |
-|----------|-------------|---------|
-| `OpEqual` | Equality | `field = value` |
-| `OpNotEqual` | Not equal | `field != value` |
-| `OpGreater` | Greater than | `field > value` |
-| `OpGreaterEqual` | Greater than or equal | `field >= value` |
-| `OpLess` | Less than | `field < value` |
-| `OpLessEqual` | Less than or equal | `field <= value` |
-| `OpLike` | Pattern matching | `field LIKE 'value%'` |
-| `OpIn` | List of values | `field IN (v1, v2)` |
-| `OpBetween` | Range | `field BETWEEN v1 AND v2` |
-
-### Query Builder (Advanced Usage)
-
-For more complex queries, use the QueryBuilder directly:
-
-```go
-qb := table.Query().
-    Select("timestamp", "org_id", "payload").
-    Where("org_id", chModel.OpEqual, "org-456").
-    Where("timestamp", chModel.OpGreaterEqual, startTime).
-    OrderBy("timestamp DESC").
-    Limit(100).
-    Offset(0)
-
-query, args := qb.BuildSelect()
-// query: "SELECT timestamp, org_id, payload FROM events_raw WHERE org_id = ? AND timestamp >= ? ORDER BY timestamp DESC LIMIT 100 OFFSET 0"
-// args: ["org-456", startTime]
-
-// Execute manually
-rows, err := conn.Query(ctx, query, args...)
-```
-
-### Count
-
-```go
-count, err := table.Count(ctx, chModel.Map{"org_id": "org-456"})
-```
-
-## Complete Example: Repository
-
-```go
-package clickhouseRepo
-
-import (
-    "context"
-    "time"
-
-    "myservice/domain/entities"
-    "myservice/domain/repositories"
-
-    "github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-    chModel "github.com/Mapex-Solutions/MapexOS/infrastructure/clickhouse/model"
-)
-
-type EventRepositoryClickHouse struct {
-    conn          driver.Conn
-    rawEventTable *chModel.Table[entities.RawEvent]
-}
-
-func NewEventRepository(conn driver.Conn) repositories.EventRepository {
-    rawTable, err := chModel.NewTable[entities.RawEvent](conn, "events_raw", chModel.TableConfig{
-        TimestampField: "timestamp",
-        DefaultOrder:   "DESC",
-    })
-    if err != nil {
-        // Handle error
-    }
-
-    return &EventRepositoryClickHouse{
-        conn:          conn,
-        rawEventTable: rawTable,
-    }
-}
-
-func (r *EventRepositoryClickHouse) SaveRawEventBatch(ctx context.Context, events []*entities.RawEvent) error {
-    return r.rawEventTable.InsertBatch(ctx, events)
-}
-
-func (r *EventRepositoryClickHouse) QueryEventsRaw(
-    ctx context.Context,
-    orgFilter chModel.Map,
-    startTime *time.Time,
-    endTime *time.Time,
-    pagination *chModel.PaginationOpts,
-    sort string,
-) (*chModel.PaginatedResult[entities.RawEvent], error) {
-
-    filters := []chModel.Filter{}
-
-    // Org filter
-    if orgId, ok := orgFilter["orgId"]; ok {
-        filters = append(filters, chModel.Filter{
-            Field:    "org_id",
-            Operator: chModel.OpEqual,
-            Value:    orgId,
-        })
-    }
-
-    // Date range with BETWEEN
-    if startTime != nil && endTime != nil {
-        filters = append(filters, chModel.Filter{
-            Field:    "timestamp",
-            Operator: chModel.OpBetween,
-            Value:    *startTime,
-            EndValue: *endTime,
-        })
-    }
-
-    return r.rawEventTable.FindWithFilters(ctx, filters, pagination, sort)
+type HealthStatus struct {
+    Connected    bool      `json:"connected"`
+    Database     string    `json:"database"`
+    Host         string    `json:"host"`
+    Port         int       `json:"port"`
+    LastCheckAt  time.Time `json:"lastCheckAt"`
+    ErrorMessage string    `json:"errorMessage,omitempty"`
 }
 ```
 
-## DI Container Configuration (dig)
+### Constants
+
+| Constant | Value |
+|---|---|
+| `DefaultMonitorInterval` | `10 * time.Second` |
+| `DefaultPort` | `9000` |
+| `DefaultConnectTimeout` | `5 * time.Second` |
+| `DefaultPingTimeout` | `3 * time.Second` |
+
+### Errors
+
+| Sentinel | Message |
+|---|---|
+| `ErrMissingConfig` | `host, database, username, and password are required` |
+| `ErrNotConnected` | `clickhouse is not connected` |
+| `ErrConnectionFailed` | `failed to connect to clickhouse` |
+| `ErrPingFailed` | `clickhouse ping failed` |
+
+## Model: `chModel` — Generic table layer
+
+A `Table[T any]` provides typed Insert/Query/Pagination on a single ClickHouse table. Field metadata is derived once via reflection and cached.
+
+### Construction
 
 ```go
-import (
-    "github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-    chManager "github.com/Mapex-Solutions/MapexOS/infrastructure/clickhouse/manager"
-)
+type Event struct {
+    Timestamp time.Time              `ch:"timestamp"`
+    OrgId     string                 `ch:"org_id"`
+    Payload   map[string]interface{} `ch:"payload"`   // marshaled to JSON
+}
 
-// Provide ClickHouseManager
-c.Provide(func() *chManager.ClickHouseManager {
-    ch, err := chManager.New(chManager.Config{
-        Host:            cfg.Host,
-        Port:            cfg.Port,
-        Database:        cfg.Database,
-        Username:        cfg.Username,
-        Password:        cfg.Password,
-        EnableMonitor:   true,
-        MonitorInterval: 30 * time.Second,
-    })
-    if err != nil {
-        logger.Panic(err.Error())
-    }
-    return ch
-})
-
-// Provide raw connection for repositories
-c.Provide(func(ch *chManager.ClickHouseManager) driver.Conn {
-    return ch.GetConn()
+table, err := chModel.NewTable[Event](conn, "events", chModel.TableConfig{
+    TimestampField: "timestamp", // default "timestamp"
+    DefaultOrder:   "DESC",      // default "DESC"
+    DefaultTimeout: 30*time.Second, // default 30s
 })
 ```
 
-## Important Notes
+`NewTable` returns `ErrInvalidType` when `T` is not a struct, `ErrNoFields` when no exported fields carry a `ch` (or fallback `json`) tag.
 
-1. **Field order**: The order of fields in the struct should match the order of columns in the ClickHouse table for better performance.
+### Field metadata (`reflection.go`)
 
-2. **Automatic JSON**: Fields of type `map[string]interface{}` or `[]interface{}` are automatically serialized/deserialized as JSON.
+For each exported struct field, the column name comes from the `ch` tag, falling back to `json` (first segment before `,`). Tag value `"-"` or empty skips the field.
 
-3. **Timestamps**: Configure `TimestampField` to enable default time-based ordering.
+`fieldInfo` flags computed once per struct:
 
-4. **Batch inserts**: Use `InsertBatch` for large data volumes - ClickHouse is optimized for bulk operations.
+| Flag | Meaning |
+|---|---|
+| `IsJSON` | `true` for `map` or `slice` types — JSON-marshaled on insert, JSON-unmarshaled on scan. **Exceptions:** `[]byte` (passes raw) and `map[<numericKey>]V` (native ClickHouse `Map(K, V)`, not JSON). |
+| `IsPointer` | `true` when field is a pointer; nil pointers map to SQL `nil` on insert. |
+| `IsTime` | `true` for `time.Time` or `*time.Time` — used by `FindByCursor`. |
 
-5. **BETWEEN vs range**: For date filters, prefer `OpBetween` instead of two separate filters (`>=` and `<=`) for more efficient queries.
+### Operations on `*Table[T]`
+
+| Method | Behaviour |
+|---|---|
+| `Insert(ctx, *T) error` | `Exec` `INSERT INTO ... VALUES (?, ?, ...)`. Errors wrap `ErrQueryFailed`. |
+| `InsertBatch(ctx, []*T) error` | `PrepareBatch` + `batch.Append` per item + `batch.Send`. Empty slice → `ErrEmptyItems`. Errors wrap `ErrBatchFailed`. Logs `[INFRA:CLICKHOUSE] Batch inserted: %d records into %s`. |
+| `Count(ctx, Map) (uint64, error)` | `SELECT COUNT(*) FROM ... WHERE field = ?`. |
+| `FindByOffset(ctx, Map, *PaginationOpts, sort) (*PaginatedResult[T], error)` | Page/PerPage pagination with `Count` round-trip. |
+| `FindWithFilters(ctx, []Filter, *PaginationOpts, sort) (*PaginatedResult[T], error)` | Like `FindByOffset` but accepts richer `Filter` operators. |
+| `FindByCursor(ctx, []Filter, *TimeCursorOpts) (*TimeCursorResult[T], error)` | Time-based cursor pagination — no `COUNT(*)`. **Logs the generated SQL via `logger.Info` on every call.** Returns `HasNext`/`HasPrevious`, `NextCursor`/`PrevCursor`. |
+| `TableName() string`, `Config() TableConfig`, `Columns() []string`, `Conn() driver.Conn` | Introspection / escape hatches. |
+| `Query() *QueryBuilder` | Manual query construction. |
+
+### Pagination defaults
+
+| Constant | Value |
+|---|---|
+| `DefaultPage` | `1` |
+| `DefaultPerPage` | `25` |
+| `MaxPerPage` | `300` (silently clamps `pagination.PerPage > 300` to default) |
+| `MaxOffset` | `10000` (silently clamps offsets greater than this) |
+
+### Sort string parsing
+
+`ParseSort("timestamp:desc", "timestamp", "DESC")` → `"timestamp DESC"`. Direction is uppercased; unrecognised direction falls back to `defaultOrder`. Empty `sort` falls back to `<defaultField> <defaultOrder>`.
+
+### `QueryBuilder` (`query_builder.go`)
+
+Fluent SQL builder. `BuildSelect` and `BuildCount` return `(query, args)` ready for `conn.Query`.
+
+| Method | SQL |
+|---|---|
+| `Select(cols...)` | `SELECT col1, col2, ...` (default `SELECT *`) |
+| `Where(field, op, value)` | `field <op> ?` (or `field IN (?)` / `field BETWEEN ? AND ?`) |
+| `WhereFilter(Filter)` / `WhereFilters([]Filter)` | Same with `Filter` struct (handles `OpBetween` two-value) |
+| `WhereMap(Map)` | Equality-only convenience — every entry becomes `field = ?` |
+| `WhereLike(field, pattern)` | `field LIKE ?` |
+| `WhereRaw(clause, args...)` | Untemplated escape hatch |
+| `OrderBy(...)`, `Limit(n)`, `Offset(n)` | Final clauses |
+| `BuildSelect()` / `BuildCount()` | Render |
+
+Package-level builders: `BuildInsert(table, cols)`, `BuildInsertBatch(table, cols)` (no `VALUES`, for `PrepareBatch`).
+
+### Filter operators
+
+```go
+OpEqual        FilterOperator = "="
+OpNotEqual     FilterOperator = "!="
+OpGreater      FilterOperator = ">"
+OpGreaterEqual FilterOperator = ">="
+OpLess         FilterOperator = "<"
+OpLessEqual    FilterOperator = "<="
+OpLike         FilterOperator = "LIKE"
+OpIn           FilterOperator = "IN"
+OpNotIn        FilterOperator = "NOT IN"
+OpBetween      FilterOperator = "BETWEEN"
+```
+
+### `Map` shortcut operators (in `buildWhereFromMap`)
+
+A helper exists that recognises MongoDB-style operator maps inside `Map` filters. It is defined in `methods.go` but is **not currently invoked** by the public `Find*` methods — they use `WhereMap` (equality-only) for `Map` filters and require `[]Filter` for the other operators.
+
+```go
+// Recognised tokens (when this helper is wired)
+$regex  → field LIKE ?     // strips leading "^", appends "%"
+$gt     → field > ?
+$gte    → field >= ?
+$lt     → field < ?
+$lte    → field <= ?
+$ne     → field != ?
+$in     → field IN (?)
+```
+
+### `TimeCursorOpts` / `TimeCursorResult`
+
+```go
+type TimeCursorOpts struct {
+    Cursor    interface{} // RFC3339 string or time.Time; nil = first page
+    Direction string      // "next" (default) or "prev"
+    Limit     int64       // capped by MaxPerPage; default 20
+    SortAsc   bool        // false = DESC (default)
+}
+
+type TimeCursorResult[T any] struct {
+    Items       []T       `json:"items"`
+    NextCursor  time.Time `json:"nextCursor,omitempty"`
+    PrevCursor  time.Time `json:"prevCursor,omitempty"`
+    HasNext     bool      `json:"hasNext"`
+    HasPrevious bool      `json:"hasPrevious"`
+}
+```
+
+The cursor field is taken from `TableConfig.TimestampField` (default `"timestamp"`). The implementation fetches `limit + 1` rows to detect the "more" boundary.
+
+### Errors
+
+| Sentinel | Triggered when |
+|---|---|
+| `ErrEmptyItems` | `InsertBatch` called with empty slice |
+| `ErrInvalidType` | `T` is not a struct in `NewTable[T]` |
+| `ErrNoFields` | No `ch`/`json`-tagged exported fields |
+| `ErrNotFound` | Defined; not raised by current code |
+| `ErrInvalidFilter` | Defined; not raised by current code |
+| `ErrQueryFailed` | Wraps any `Query`/`QueryRow`/`Exec` failure |
+| `ErrScanFailed` | Wraps `rows.Scan` failure |
+| `ErrBatchFailed` | Wraps `PrepareBatch` / `Append` / `Send` failure |
+| `ErrMarshalFailed` | Wraps `json.Marshal` failure during insert |
+
+JSON unmarshal errors during `scanRows` are **logged as `Warn` and the field is left zero-valued** — they do not abort the query.
+
+## End-to-end example
+
+```go
+// Manager (long-lived, with monitor)
+mgr, err := chManager.New(chManager.Config{
+    Host: "ch.local", Database: "mapex", Username: "default", Password: secret,
+    EnableMonitor: true, MonitorInterval: 10*time.Second,
+})
+if err != nil { return err }
+defer mgr.Close()
+
+// Generic table on top of the manager's connection
+type Event struct {
+    Timestamp time.Time `ch:"timestamp"`
+    OrgId     string    `ch:"org_id"`
+    Payload   chModel.Map `ch:"payload"`  // JSON-marshaled
+}
+events, _ := chModel.NewTable[Event](mgr.GetConn(), "events", chModel.TableConfig{})
+
+// Batch insert
+_ = events.InsertBatch(ctx, batch)
+
+// Cursor pagination, last 50 events of the org
+res, err := events.FindByCursor(ctx,
+    []chModel.Filter{{Field: "org_id", Operator: chModel.OpEqual, Value: "org-123"}},
+    &chModel.TimeCursorOpts{Limit: 50, Direction: "next"})
+if err != nil { return err }
+for _, ev := range res.Items { _ = ev }
+if res.HasNext {
+    // pass res.NextCursor as TimeCursorOpts.Cursor on the next call
+}
+```
