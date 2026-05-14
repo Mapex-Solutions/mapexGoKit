@@ -20,7 +20,6 @@ require (
 require (
 	github.com/ClickHouse/ch-go v0.69.0 // indirect
 	github.com/ClickHouse/clickhouse-go/v2 v2.42.0 // indirect
-	github.com/Mapex-Solutions/myAIOffice/contracts v0.0.0
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -32,7 +31,6 @@ require (
 	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
-	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.11 // indirect
@@ -80,11 +78,6 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-
-
-
 replace github.com/Mapex-Solutions/mapexGoKit/infrastructure => ../infrastructure
 
 replace github.com/Mapex-Solutions/mapexGoKit/utils => ../utils
-
-replace github.com/Mapex-Solutions/myAIOffice/contracts => ../../myAIOffice/workspace_go/packages/contracts

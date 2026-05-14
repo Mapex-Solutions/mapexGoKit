@@ -253,6 +253,10 @@ func (b *Bus) PublishScheduled(config ScheduledPublishConfig) error {
 	msg.Header.Set("Nats-Schedule", fmt.Sprintf("@at %s", config.ScheduleAt.UTC().Format(time.RFC3339)))
 	msg.Header.Set("Nats-Schedule-Target", config.TargetSubject)
 
+	if config.MsgId != "" {
+		msg.Header.Set("Nats-Msg-Id", config.MsgId)
+	}
+
 	for k, v := range config.Headers {
 		msg.Header.Set(k, v)
 	}
@@ -286,6 +290,34 @@ func (b *Bus) PurgeStreamSubject(streamName, subject string) error {
 	}
 
 	return nil
+}
+
+// HasPendingMessages checks if a stream has any messages matching the given subject.
+// Returns true if at least one message exists, false otherwise.
+// Idempotent: returns false if the stream doesn't exist.
+func (b *Bus) HasPendingMessages(streamName, subject string) (bool, error) {
+	ctx := context.Background()
+
+	stream, err := b.c.js.Stream(ctx, streamName)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrStreamNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to get stream %s: %w", streamName, err)
+	}
+
+	info, err := stream.Info(ctx, jetstream.WithSubjectFilter(subject))
+	if err != nil {
+		return false, fmt.Errorf("failed to get stream info for %s: %w", streamName, err)
+	}
+
+	for _, count := range info.State.Subjects {
+		if count > 0 {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // EnsureStream creates or updates a JetStream stream. Idempotent.

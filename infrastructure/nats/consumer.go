@@ -9,6 +9,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/Mapex-Solutions/mapexGoKit/microservices/logger"
+	"github.com/Mapex-Solutions/mapexGoKit/utils/random"
 )
 
 // StartConsumer creates and starts a new managed consumer with automatic goroutine handling.
@@ -482,8 +483,18 @@ func (b *Bus) SubscribeFanout(stream, serviceName, subject string, handler Fanou
 	}
 
 	ctx := context.Background()
+	// Suffix uses crypto/rand to guarantee uniqueness across multiple subscribes
+	// in the same second (e.g., a service that registers asset_invalidate +
+	// template_invalidate consumers back-to-back at startup). Without the random
+	// suffix, both calls produced the same consumerName and the second
+	// CreateOrUpdateConsumer overwrote the first — breaking the FilterSubject of
+	// the earlier subscription.
+	randomSuffix, err := random.GenerateSessionID(4) // 8 hex chars
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate fanout consumer suffix: %w", err)
+	}
 	timestamp := time.Now().Format("20060102-150405")
-	consumerName := fmt.Sprintf("%s-fanout-%s", serviceName, timestamp)
+	consumerName := fmt.Sprintf("%s-fanout-%s-%s", serviceName, timestamp, randomSuffix)
 
 	logger.Info(fmt.Sprintf("[INFRA:NATS] FANOUT Creating ephemeral subscription: %s -> %s (stream: %s)", consumerName, subject, stream))
 

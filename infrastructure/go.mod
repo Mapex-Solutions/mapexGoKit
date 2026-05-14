@@ -5,6 +5,7 @@ require (
 	github.com/Mapex-Solutions/mapexGoKit/microservices v0.0.0
 	github.com/Mapex-Solutions/mapexGoKit/utils v0.0.0
 	github.com/dgraph-io/ristretto v0.2.0
+	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/go-redsync/redsync/v4 v4.13.0
 	github.com/google/uuid v1.6.0
 	github.com/minio/minio-go/v7 v7.0.97
@@ -24,6 +25,7 @@ require (
 	github.com/go-faster/city v1.0.1 // indirect
 	github.com/go-faster/errors v0.7.1 // indirect
 	github.com/go-ini/ini v1.67.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
@@ -65,8 +67,6 @@ require (
 )
 
 go 1.25.3
-
-
 
 replace github.com/Mapex-Solutions/mapexGoKit/microservices => ../microservices
 

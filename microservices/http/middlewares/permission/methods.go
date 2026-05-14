@@ -51,7 +51,7 @@ func InitPermissionMiddleware(sharedCache common.SharedCache, baseURL, apiKey st
 //
 //	import (
 //	    permissionMw "github.com/Mapex-Solutions/mapexGoKit/microservices/http/middlewares/permission"
-//	    perms "github.com/Mapex-Solutions/myAIOffice/permissions/mapexos"
+//	    perms "github.com/Mapex-Solutions/<your-project>/permissions/mapexos"
 //	)
 //
 //	group.Get("/",

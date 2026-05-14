@@ -358,3 +358,208 @@ func TestStatusCode_300_IsError(t *testing.T) {
 		t.Error("300 should be error")
 	}
 }
+
+/** SetHeader */
+
+func TestSetHeader_AppliesToRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer token-123" {
+			t.Errorf("expected Authorization 'Bearer token-123', got %q", got)
+		}
+		if got := r.Header.Get("X-Org-Context"); got != "org-aaa" {
+			t.Errorf("expected X-Org-Context 'org-aaa', got %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	client := New(Config{BaseURL: server.URL})
+	client.SetHeader("Authorization", "Bearer token-123")
+	client.SetHeader("X-Org-Context", "org-aaa")
+
+	if err := client.Get(context.Background(), "/api/test", nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSetHeader_EmptyValueRemoves(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("expected Authorization removed, got %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	client := New(Config{BaseURL: server.URL})
+	client.SetHeader("Authorization", "Bearer token-123")
+	client.SetHeader("Authorization", "")
+
+	if err := client.Get(context.Background(), "/api/test", nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSetHeader_OverridesContentType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Content-Type"); got != "text/plain" {
+			t.Errorf("expected Content-Type 'text/plain', got %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	client := New(Config{BaseURL: server.URL})
+	client.SetHeader("Content-Type", "text/plain")
+
+	if err := client.Get(context.Background(), "/api/test", nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+/** Raw */
+
+func TestRaw_ReturnsResponseWithoutDecoding(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Marker", "yes")
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id":"abc"}`))
+	}))
+	defer server.Close()
+
+	client := New(Config{BaseURL: server.URL})
+	resp, err := client.Raw(context.Background(), "POST", "/api/things", map[string]string{"name": "x"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("expected 201, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Marker"); got != "yes" {
+		t.Errorf("expected X-Marker 'yes', got %q", got)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if string(body) != `{"id":"abc"}` {
+		t.Errorf("expected raw body preserved, got %q", string(body))
+	}
+}
+
+func TestRaw_DoesNotRejectNon2xx(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"bad"}`))
+	}))
+	defer server.Close()
+
+	client := New(Config{BaseURL: server.URL})
+	resp, err := client.Raw(context.Background(), "GET", "/api/x", nil)
+	if err != nil {
+		t.Fatalf("Raw must surface 4xx via resp.StatusCode, not err: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", resp.StatusCode)
+	}
+}
+
+func TestRaw_AppliesSetHeader(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer abc" {
+			t.Errorf("expected Authorization 'Bearer abc', got %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := New(Config{BaseURL: server.URL})
+	client.SetHeader("Authorization", "Bearer abc")
+	resp, err := client.Raw(context.Background(), "GET", "/api/x", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resp.Body.Close()
+}
+
+/** RawWithHeaders */
+
+func TestRawWithHeaders_MergesPerCallHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer base" {
+			t.Errorf("expected base Authorization preserved, got %q", got)
+		}
+		if got := r.Header.Get("X-Refresh-Token"); got != "rt-1" {
+			t.Errorf("expected per-call X-Refresh-Token 'rt-1', got %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := New(Config{BaseURL: server.URL})
+	client.SetHeader("Authorization", "Bearer base")
+
+	resp, err := client.RawWithHeaders(context.Background(), "POST", "/auth/refresh", nil, map[string]string{
+		"X-Refresh-Token": "rt-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resp.Body.Close()
+}
+
+func TestRawWithHeaders_DoesNotMutateClient(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			if got := r.Header.Get("X-Once"); got != "yes" {
+				t.Errorf("call 1: expected X-Once 'yes', got %q", got)
+			}
+		}
+		if calls == 2 {
+			if got := r.Header.Get("X-Once"); got != "" {
+				t.Errorf("call 2: expected X-Once cleared, got %q", got)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := New(Config{BaseURL: server.URL})
+
+	resp, err := client.RawWithHeaders(context.Background(), "GET", "/x", nil, map[string]string{"X-Once": "yes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	resp, err = client.Raw(context.Background(), "GET", "/x", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+}
+
+func TestRaw_NilBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if len(body) != 0 {
+			t.Errorf("expected empty body, got %d bytes", len(body))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := New(Config{BaseURL: server.URL})
+	resp, err := client.Raw(context.Background(), "DELETE", "/api/x", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	resp.Body.Close()
+}

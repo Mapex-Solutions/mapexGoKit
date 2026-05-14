@@ -45,14 +45,20 @@ type CorePublisher interface {
 }
 
 // ScheduleManager is the contract for NATS JetStream message scheduling operations.
-// Supports scheduled publish (@at) and subject-based stream purge for cancellation.
+// Supports scheduled publish (@at), subject-based stream purge, and pending message checks.
 type ScheduleManager interface {
 	// PublishScheduled publishes a message with Nats-Schedule headers for delayed delivery.
+	// If MsgId is set, NATS rejects duplicates within the stream's Duplicates window.
 	PublishScheduled(config ScheduledPublishConfig) error
 
 	// PurgeStreamSubject purges all messages matching a subject pattern from a stream.
 	// Idempotent: returns nil if no messages match (already fired or never published).
 	PurgeStreamSubject(stream, subject string) error
+
+	// HasPendingMessages checks if a stream has any messages matching the given subject.
+	// Returns true if at least one message exists, false otherwise.
+	// Idempotent: returns false if the stream doesn't exist.
+	HasPendingMessages(stream, subject string) (bool, error)
 }
 
 // ConnectionProvider provides access to the underlying NATS connection.

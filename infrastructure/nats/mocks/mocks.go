@@ -348,3 +348,40 @@ func (m *MockKeyValueStore) Bucket() string {
 
 // Compile-time check
 var _ natsModel.KeyValueStore = (*MockKeyValueStore)(nil)
+
+/**
+Mock Schedule Manager
+*/
+
+// MockScheduleManager implements natsModel.ScheduleManager interface for testing.
+// Use this mock for services that publish scheduled messages or check pending schedules.
+//
+// Example usage:
+//
+//	mockSched := new(mocks.MockScheduleManager)
+//	mockSched.On("HasPendingMessages", "STREAM", "subject").Return(false, nil)
+//	mockSched.On("PublishScheduled", mock.Anything).Return(nil)
+type MockScheduleManager struct {
+	mock.Mock
+}
+
+// PublishScheduled mocks the PublishScheduled method.
+func (m *MockScheduleManager) PublishScheduled(config natsModel.ScheduledPublishConfig) error {
+	args := m.Called(config)
+	return args.Error(0)
+}
+
+// PurgeStreamSubject mocks the PurgeStreamSubject method.
+func (m *MockScheduleManager) PurgeStreamSubject(stream, subject string) error {
+	args := m.Called(stream, subject)
+	return args.Error(0)
+}
+
+// HasPendingMessages mocks the HasPendingMessages method.
+func (m *MockScheduleManager) HasPendingMessages(stream, subject string) (bool, error) {
+	args := m.Called(stream, subject)
+	return args.Bool(0), args.Error(1)
+}
+
+// Compile-time check
+var _ natsModel.ScheduleManager = (*MockScheduleManager)(nil)

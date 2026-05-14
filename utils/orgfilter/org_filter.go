@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	ctx "github.com/Mapex-Solutions/myAIOffice/contracts/common/context"
+	ctx "github.com/Mapex-Solutions/mapexGoKit/microservices/common/context"
 	model "github.com/Mapex-Solutions/mapexGoKit/infrastructure/mongodb/model"
 	"github.com/Mapex-Solutions/mapexGoKit/utils/pathkey"
 )

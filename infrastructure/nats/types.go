@@ -505,6 +505,7 @@ type ScheduledPublishConfig struct {
 	TargetSubject string            // Required: where NATS delivers the message at ScheduleAt time
 	ScheduleAt    time.Time         // Required: when to deliver (UTC, RFC3339)
 	Data          any               // Required: message payload (will be JSON marshaled)
+	MsgId         string            // Optional: deduplication ID (rejected if duplicate within stream's Duplicates window)
 	Headers       map[string]string // Optional: additional headers
 }
 

@@ -7,7 +7,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
-	ctx "github.com/Mapex-Solutions/myAIOffice/contracts/common/context"
+	ctx "github.com/Mapex-Solutions/mapexGoKit/microservices/common/context"
 	common "github.com/Mapex-Solutions/mapexGoKit/infrastructure/common/ports"
 	middlewaresAuth "github.com/Mapex-Solutions/mapexGoKit/microservices/http/middlewares/auth"
 	"github.com/Mapex-Solutions/mapexGoKit/microservices/http/response"

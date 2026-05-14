@@ -5,6 +5,7 @@ package configuration
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	clickhouseModel "github.com/Mapex-Solutions/mapexGoKit/infrastructure/clickhouse"
@@ -400,4 +401,62 @@ func GetClickHouseConfig() clickhouseModel.Config {
 		Username: username,
 		Password: password,
 	}
+}
+
+// GetEnv returns the runtime environment prefix used to namespace JetStream
+// streams, subjects, and consumer durables. It reads the "go_env" config key
+// (registered in every service via {Key: "go_env", Env: "GO_ENV", Default: "dev"}).
+// If the key is missing, the value is the empty string, or the config
+// singleton has not been initialized yet (which happens when stream/subject
+// constants are computed at package init in tests that do not call
+// InitConfig), GetEnv returns "dev".
+//
+// Example: GetEnv() returns "dev" by default, "prod" when GO_ENV=prod.
+func GetEnv() string {
+	if instance == nil {
+		return "dev"
+	}
+	v, err := GetStringValue("go_env")
+	if err != nil || v == "" {
+		return "dev"
+	}
+	return v
+}
+
+// StreamName builds a canonical JetStream stream name following the pattern
+// ${ENV}-MAPEXOS-{SERVICE}-{CONTEXT}. Env, service, and context are uppercased
+// independently of the input casing. When context is empty, the trailing dash
+// is omitted (returns ${ENV}-MAPEXOS-{SERVICE}).
+//
+// Example: StreamName("ASSETS", "HEARTBEAT") returns "DEV-MAPEXOS-ASSETS-HEARTBEAT"
+// when GO_ENV=dev, "PROD-MAPEXOS-ASSETS-HEARTBEAT" when GO_ENV=prod.
+func StreamName(service, context string) string {
+	env := strings.ToUpper(GetEnv())
+	svc := strings.ToUpper(service)
+	if context == "" {
+		return env + "-MAPEXOS-" + svc
+	}
+	return env + "-MAPEXOS-" + svc + "-" + strings.ToUpper(context)
+}
+
+// Subject builds a canonical NATS subject following the pattern
+// ${env}.mapexos.{service}.{action}. Env, service, and action are lowercased
+// independently of the input casing.
+//
+// Example: Subject("events", "save") returns "dev.mapexos.events.save"
+// when GO_ENV=dev, "prod.mapexos.events.save" when GO_ENV=prod.
+func Subject(service, action string) string {
+	env := strings.ToLower(GetEnv())
+	return env + ".mapexos." + strings.ToLower(service) + "." + strings.ToLower(action)
+}
+
+// Durable builds a canonical JetStream consumer durable name following the
+// pattern ${env}-{service}-{context}-consumer. Env, service, and context are
+// lowercased independently of the input casing.
+//
+// Example: Durable("events", "save") returns "dev-events-save-consumer"
+// when GO_ENV=dev, "prod-events-save-consumer" when GO_ENV=prod.
+func Durable(service, context string) string {
+	env := strings.ToLower(GetEnv())
+	return env + "-" + strings.ToLower(service) + "-" + strings.ToLower(context) + "-consumer"
 }

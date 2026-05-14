@@ -70,6 +70,33 @@ func (r *RedisClient) HDel(ctx context.Context, key string, field string) error 
 	return r.client.HDel(ctx, prefixed, field).Err()
 }
 
+// HSet writes a field on a hash with the given string value. Idempotent.
+func (r *RedisClient) HSet(ctx context.Context, key string, field string, value string) error {
+	prefixed := r.keyPrefix + ":" + key
+	return r.client.HSet(ctx, prefixed, field, value).Err()
+}
+
+// HSetInt64 writes a field on a hash with an int64 value (e.g., unix timestamps).
+// Convenience over HSet to avoid string-formatting noise at call sites.
+func (r *RedisClient) HSetInt64(ctx context.Context, key string, field string, value int64) error {
+	prefixed := r.keyPrefix + ":" + key
+	return r.client.HSet(ctx, prefixed, field, value).Err()
+}
+
+// HGet returns the value of a hash field as a string. Returns redis.Nil error
+// when the field does not exist; callers should check errors.Is(err, redis.Nil).
+func (r *RedisClient) HGet(ctx context.Context, key string, field string) (string, error) {
+	prefixed := r.keyPrefix + ":" + key
+	return r.client.HGet(ctx, prefixed, field).Result()
+}
+
+// HGetInt64 returns the value of a hash field parsed as int64. Returns
+// redis.Nil error when the field does not exist.
+func (r *RedisClient) HGetInt64(ctx context.Context, key string, field string) (int64, error) {
+	prefixed := r.keyPrefix + ":" + key
+	return r.client.HGet(ctx, prefixed, field).Int64()
+}
+
 /**
  * SET OPERATIONS
  * Redis sets for membership tracking (e.g., alerted assets, active orgs).
@@ -85,6 +112,13 @@ func (r *RedisClient) SAdd(ctx context.Context, key string, member string) error
 func (r *RedisClient) SRem(ctx context.Context, key string, member string) error {
 	prefixed := r.keyPrefix + ":" + key
 	return r.client.SRem(ctx, prefixed, member).Err()
+}
+
+// SRemN removes a member from a set and returns the number of members actually removed.
+// Use this for race-free transitions: only the caller that gets n=1 caused the removal.
+func (r *RedisClient) SRemN(ctx context.Context, key string, member string) (int64, error) {
+	prefixed := r.keyPrefix + ":" + key
+	return r.client.SRem(ctx, prefixed, member).Result()
 }
 
 // SIsMember checks if a member exists in a set.

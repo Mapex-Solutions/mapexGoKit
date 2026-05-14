@@ -34,6 +34,7 @@ type HTTPClient struct {
 	baseURL    string
 	apiKey     string
 	httpClient *http.Client
+	headers    map[string]string
 }
 
 // Config defines the configuration for creating a new HTTPClient.
@@ -62,6 +63,94 @@ func New(config Config) *HTTPClient {
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
+		headers: make(map[string]string),
+	}
+}
+
+// SetHeader registers a header that will be attached to every subsequent
+// request. Passing an empty value removes the header. Use it for
+// per-client identity such as Authorization, X-Org-Context, or X-Tenant
+// — anything that is not part of the request body but follows the client
+// for its whole lifetime.
+func (c *HTTPClient) SetHeader(key, value string) {
+	if c.headers == nil {
+		c.headers = make(map[string]string)
+	}
+	if value == "" {
+		delete(c.headers, key)
+		return
+	}
+	c.headers[key] = value
+}
+
+// Raw performs an HTTP request and returns the raw http.Response without
+// reading the body, without unmarshaling, and without rejecting non-2xx
+// status codes. Callers own the response lifetime and MUST close
+// resp.Body when finished. This is the entry point used by saga journeys
+// where the test asserts directly on the status code (e.g. "creation
+// returns 201") rather than on a deserialized DTO.
+func (c *HTTPClient) Raw(ctx context.Context, method, endpoint string, body interface{}) (*http.Response, error) {
+	url := c.baseURL + endpoint
+
+	var bodyReader io.Reader
+	if body != nil {
+		jsonBody, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		bodyReader = bytes.NewReader(jsonBody)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	c.applyHeaders(req)
+
+	return c.httpClient.Do(req)
+}
+
+// RawWithHeaders is identical to Raw but accepts a per-call header map
+// merged on top of the headers registered with SetHeader. The override is
+// scoped to this single request; it does not mutate the client. Use it for
+// requests that need a header only once — refresh-token flows that send
+// X-Refresh-Token, fan-in endpoints that need a specific X-Trace-Id, etc.
+func (c *HTTPClient) RawWithHeaders(ctx context.Context, method, endpoint string, body any, headers map[string]string) (*http.Response, error) {
+	url := c.baseURL + endpoint
+
+	var bodyReader io.Reader
+	if body != nil {
+		jsonBody, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+		bodyReader = bytes.NewReader(jsonBody)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	c.applyHeaders(req)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+
+	return c.httpClient.Do(req)
+}
+
+// applyHeaders sets the standard headers (Content-Type, X-API-Key) plus
+// any caller-registered headers via SetHeader. Caller headers win — they
+// can override Content-Type if the body is not JSON.
+func (c *HTTPClient) applyHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("X-API-Key", c.apiKey)
+	}
+	for k, v := range c.headers {
+		req.Header.Set(k, v)
 	}
 }
 
@@ -137,13 +226,8 @@ func (c *HTTPClient) doRequest(ctx context.Context, method, endpoint string, bod
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set headers
-	req.Header.Set("Content-Type", "application/json")
-	if c.apiKey != "" {
-		req.Header.Set("X-API-Key", c.apiKey)
-	}
+	c.applyHeaders(req)
 
-	// Execute request
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to execute request: %w", err)
