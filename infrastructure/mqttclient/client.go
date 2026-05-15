@@ -18,6 +18,7 @@ package mqttclient
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"sync"
@@ -61,6 +62,13 @@ type Config struct {
 	// false so a drop fails the test instead of silently recovering.
 	// Default: false.
 	AutoReconnect bool
+
+	// TLSConfig drives the TLS handshake for `ssl://` brokers. When
+	// non-nil it is passed to the underlying paho client unchanged,
+	// so callers control RootCAs, Certificates, MinVersion, etc.
+	// directly. Pair with a `ssl://` BrokerURL — `tcp://` brokers
+	// ignore this field.
+	TLSConfig *tls.Config
 }
 
 // Client wraps a paho client with a context-aware surface. Concurrent
@@ -132,6 +140,9 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 	if c.cfg.Password != "" {
 		opts.SetPassword(c.cfg.Password)
+	}
+	if c.cfg.TLSConfig != nil {
+		opts.SetTLSConfig(c.cfg.TLSConfig)
 	}
 
 	client := mqtt.NewClient(opts)
