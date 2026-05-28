@@ -18,12 +18,12 @@ func getTestConfig() Config {
 
 	accessKey := os.Getenv("MINIO_TEST_ACCESS_KEY")
 	if accessKey == "" {
-		accessKey = "mapexos_admin"
+		accessKey = "mapex_admin"
 	}
 
 	secretKey := os.Getenv("MINIO_TEST_SECRET_KEY")
 	if secretKey == "" {
-		secretKey = "mapexos_admin_secret_change_me"
+		secretKey = "mapex_admin_secret_change_me"
 	}
 
 	return Config{

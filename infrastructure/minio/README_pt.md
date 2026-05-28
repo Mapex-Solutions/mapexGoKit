@@ -212,5 +212,5 @@ objs, err := client.List(ctx, &minioModel.ListOptions{
 ## Testes
 
 - Testes unitários (`TestValidateConfig`, `TestPrefixKey`, `TestBuildPutOptions`, `TestConvertObjectInfo`, `TestErrorTypes`, `TestConstants`) rodam sem rede.
-- Testes de integração (`*_Integration`) são pulados quando `New(Config)` falha (MinIO indisponível). Padrões: `localhost:9000`, `mapexos_admin` / `mapexos_admin_secret_change_me`, bucket `mapex-templates`, prefixo `test`. Sobrescreva via `MINIO_TEST_ENDPOINT`, `MINIO_TEST_ACCESS_KEY`, `MINIO_TEST_SECRET_KEY`.
+- Testes de integração (`*_Integration`) são pulados quando `New(Config)` falha (MinIO indisponível). Padrões: `localhost:9000`, `mapex_admin` / `mapex_admin_secret_change_me`, bucket `mapex-templates`, prefixo `test`. Sobrescreva via `MINIO_TEST_ENDPOINT`, `MINIO_TEST_ACCESS_KEY`, `MINIO_TEST_SECRET_KEY`.
 - Cobertura de integração: round-trip `Put`/`Get`/`Exists`/`Stat`/`Delete`; `Get` em chave inexistente; guards de chave vazia; guard de data nula; `List` com prefix e `MaxKeys`; round-trip de content-type via `PutJSON`; round-trip de `Copy`.

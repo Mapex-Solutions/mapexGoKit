@@ -212,5 +212,5 @@ objs, err := client.List(ctx, &minioModel.ListOptions{
 ## Tests
 
 - Unit tests (`TestValidateConfig`, `TestPrefixKey`, `TestBuildPutOptions`, `TestConvertObjectInfo`, `TestErrorTypes`, `TestConstants`) run with no network.
-- Integration tests (`*_Integration`) skip when `New(Config)` fails (no MinIO available). Defaults: `localhost:9000`, `mapexos_admin` / `mapexos_admin_secret_change_me`, bucket `mapex-templates`, prefix `test`. Override via `MINIO_TEST_ENDPOINT`, `MINIO_TEST_ACCESS_KEY`, `MINIO_TEST_SECRET_KEY`.
+- Integration tests (`*_Integration`) skip when `New(Config)` fails (no MinIO available). Defaults: `localhost:9000`, `mapex_admin` / `mapex_admin_secret_change_me`, bucket `mapex-templates`, prefix `test`. Override via `MINIO_TEST_ENDPOINT`, `MINIO_TEST_ACCESS_KEY`, `MINIO_TEST_SECRET_KEY`.
 - Integration coverage: `Put`/`Get`/`Exists`/`Stat`/`Delete` round-trip; non-existent `Get`; empty-key guards; nil-data guard; `List` with prefix and `MaxKeys`; `PutJSON` content-type round-trip; `Copy` round-trip.
